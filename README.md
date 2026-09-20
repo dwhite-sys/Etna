@@ -75,12 +75,12 @@ skill/             ← skill folder (optional)
 
 ```
 pip install etna-mcp
-etna install
+etna init
 ```
 
-`etna install` with no arguments checks whether everything is in place and sets it up if not — creates the managed venv via UV, installs server dependencies, and registers a boot service so Etna starts automatically. Running it again after setup just shows you the getting-started hints.
+`etna init` is idempotent: it creates or repairs Etna's managed runtime, installs Etna's per-user startup service, starts it immediately, and verifies the server is healthy. Re-running it after an upgrade refreshes the managed runtime and service definition.
 
-UV is installed automatically as a dependency.
+`etna install` with no arguments remains a compatibility alias for `etna init`. UV is installed automatically as an Etna dependency and is invoked through Etna's own Python interpreter, so it does not need to be separately present on PATH.
 
 ## Adding a kit
 
@@ -101,7 +101,8 @@ etna install ntfy==1.0.0b1
 ## CLI reference
 
 ```
-etna install                          First-time setup, or getting-started hints if ready
+etna init                             Initialize/repair Etna runtime + startup service
+etna install                          Legacy alias for etna init when no target is given
 etna install <path/kit.py>            Install a kit from a local file
 etna install <path/pkg.ekp>           Install a kit package (kit + skill)
 etna install <kit_name>               Install a kit from the curated repo

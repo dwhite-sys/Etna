@@ -12,11 +12,13 @@ No per-kit processes or port assignments needed.
 
 import os
 import platform
+import plistlib
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import csv
 from pathlib import Path
 
 from etna import config as cfg
@@ -27,24 +29,37 @@ BASE_PORT = 8467
 
 # ── Venv self-repair ──────────────────────────────────────────────────────────
 
-CORE_DEPS = ["fastapi", "uvicorn[standard]", "requests"]
+CORE_DEPS = ["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0", "requests>=2.31.0"]
 
 
-def ensure_venv():
+def _uv_command() -> list[str]:
+    """Invoke uv through the exact Python interpreter running Etna."""
+    return [sys.executable, "-m", "uv"]
+
+
+def ensure_venv(refresh: bool = False):
     """
     Create the Etna venv if it doesn't exist, then install core dependencies.
     Uses UV for both operations. Skips dep install if uvicorn is already present.
     """
     venv = cfg.VENV_DIR
 
-    if not shutil.which("uv"):
-        print(f"{PREFIX}{red}UV not found. {bright_yellow}Install it from: {cyan}https://github.com/astral-sh/uv{white}")
-        sys.exit(1)
+    # A copied/moved Python install can leave a venv directory behind with a dead
+    # interpreter. Treat that as repairable state, not as a valid runtime.
+    if venv.exists():
+        try:
+            subprocess.run(
+                [str(_venv_python()), "-c", "import sys; print(sys.executable)"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            shutil.rmtree(venv, ignore_errors=True)
 
-    # If venv exists and uvicorn is already installed, skip dep install but always
-    # write the utils shim and ensure the kits dir exists
+    # On ordinary starts, a healthy runtime only needs the Etna code refreshed.
+    # ``etna init`` passes refresh=True so dependency constraints are re-synced too.
     uvicorn = _uvicorn_bin()
-    if venv.exists() and uvicorn and uvicorn.exists():
+    if not refresh and venv.exists() and uvicorn and uvicorn.exists():
+        _sync_runtime_package()
         _write_utils_shim()
         cfg.kits_dir()
         return
@@ -63,7 +78,7 @@ def ensure_venv():
         t.start()
         try:
             subprocess.run(
-                ["uv", "venv", str(venv), "--python", sys.executable],
+                _uv_command() + ["venv", str(venv), "--python", sys.executable],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=True,
@@ -94,15 +109,47 @@ def _uvicorn_bin() -> Path | None:
 
 
 def _install_core_deps():
-    """
-    Install core server dependencies (fastapi, uvicorn, requests) into the venv.
-    The etna package itself is NOT installed into the venv — it's made available
-    via PYTHONPATH pointing to wherever etna-mcp is installed on the system.
-    """
+    """Install core server dependencies and Etna itself into the managed runtime."""
     from etna.kit_manager import _install_requirements
-    _install_requirements(CORE_DEPS, kit_name="Etna core")
+    if not _install_requirements(CORE_DEPS, kit_name="Etna core"):
+        raise RuntimeError("Failed to install Etna core dependencies")
+    _sync_runtime_package()
     _write_utils_shim()
     cfg.kits_dir()
+
+
+def _venv_site_packages() -> Path:
+    """Return the managed runtime's purelib directory."""
+    result = subprocess.run(
+        [str(_venv_python()), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+        capture_output=True, text=True, check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _sync_runtime_package():
+    """
+    Copy the currently installed Etna package into the managed runtime.
+
+    This deliberately avoids making the background service depend on the shell's
+    PATH, the original console-script wrapper, or the Python environment that ran
+    ``etna init``. Re-running init refreshes the managed copy atomically enough for
+    normal upgrades: copy to a sibling temp directory, then replace the old copy.
+    """
+    src = Path(__file__).resolve().parent
+    site_packages = _venv_site_packages()
+    dst = site_packages / "etna"
+
+    if dst.exists() and src == dst.resolve():
+        return
+
+    tmp = site_packages / ".etna-runtime-new"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    shutil.copytree(src, tmp, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if dst.exists():
+        shutil.rmtree(dst)
+    tmp.replace(dst)
 
 
 def _write_utils_shim():
@@ -163,11 +210,15 @@ def unload_kit(kit_stem: str, config: dict):
 # ── Main server start / stop ──────────────────────────────────────────────────
 
 def _is_etna_server(port: int) -> bool:
-    """Check if the process on this port is actually our server."""
+    """Check if the process on this port identifies itself as Etna."""
+    import json
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://localhost:{port}/list_kits", timeout=2) as r:
-            return r.status == 200
+        with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2) as r:
+            if r.status != 200:
+                return False
+            payload = json.loads(r.read().decode("utf-8"))
+            return payload.get("service") == "etna-mcp" and payload.get("status") == "ok"
     except Exception:
         return False
 
@@ -199,26 +250,12 @@ def start_server(config: dict, verbose: bool = False) -> int:
 
     ensure_venv()
 
-    uvicorn = _uvicorn_bin()
     env = os.environ.copy()
     env["ETNA_CONFIG_DIR"] = str(cfg.CONFIG_DIR)
 
-    # Make etna importable from the venv's uvicorn process.
-    # __file__ is .../site-packages/etna/server_manager.py
-    # so two .parent calls gives us the directory containing the etna package.
-    etna_parent = str(Path(__file__).resolve().parent.parent)
-    existing_path = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [etna_parent, existing_path]))
-
-    if uvicorn:
-        cmd = [str(uvicorn), "etna.server:app",
-               "--host", "0.0.0.0", "--port", str(port),
-               "--log-level", "info" if verbose else "error"]
-    else:
-        print(f"{PREFIX}{orange}Warning: uvicorn not found in venv, falling back to system Python{white}")
-        cmd = [str(_venv_python()), "-m", "uvicorn", "etna.server:app",
-               "--host", "0.0.0.0", "--port", str(port),
-               "--log-level", "info" if verbose else "error"]
+    cmd = [str(_venv_python()), "-m", "uvicorn", "etna.server:app",
+           "--host", "0.0.0.0", "--port", str(port),
+           "--log-level", "info" if verbose else "error"]
 
     import tempfile as _tf
     stderr_file = open(_tf.mktemp(), 'w') if not verbose else None
@@ -335,26 +372,93 @@ def stop_server(config: dict):
         print(f"{PREFIX}{red}Could not stop server: {white}{light_grey}{e}{white}")
 
 
+# ── Foreground service entrypoint ─────────────────────────────────────────────
+
+def run_server_foreground(verbose: bool = False) -> int:
+    """Run the Etna HTTP server in this process for an OS service manager."""
+    import uvicorn
+
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.PID_FILE.write_text(str(os.getpid()))
+
+    config = cfg.load()
+    config["port"] = BASE_PORT
+    cfg.save(config)
+
+    try:
+        uvicorn.run(
+            "etna.server:app",
+            host="0.0.0.0",
+            port=BASE_PORT,
+            log_level="info" if verbose else "error",
+        )
+    finally:
+        try:
+            if cfg.PID_FILE.exists() and cfg.PID_FILE.read_text().strip() == str(os.getpid()):
+                cfg.PID_FILE.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def wait_for_server(timeout: float = 15.0) -> bool:
+    """Wait until the Etna identity endpoint responds on the canonical port."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _is_etna_server(BASE_PORT):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 # ── OS service registration ───────────────────────────────────────────────────
 
+def service_registered() -> bool:
+    if sys.platform.startswith("linux"):
+        return (Path.home() / ".config" / "systemd" / "user" / "etna.service").exists()
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "LaunchAgents" / "net.etna-mcp.etna.plist").exists()
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", "EtnaMCPServer"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    return False
+
+
+def _run_checked(cmd: list[str], *, description: str):
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "unknown error").strip()
+        raise RuntimeError(f"{description}: {detail}")
+    return result
+
+
 def install_service():
+    """Create or repair the current user's Etna startup service and start it now."""
+    ensure_venv(refresh=True)
+    runtime_python = _venv_python().resolve()
     system = platform.system()
-    etna_bin = shutil.which("etna")
-    if not etna_bin:
-        print(f"{PREFIX}{red}Could not find the {white}'{grey}etna{white}' {red}executable on PATH.{white}")
-        sys.exit(1)
 
     if system == "Linux":
-        _install_systemd(etna_bin)
+        _install_systemd(runtime_python)
     elif system == "Darwin":
-        _install_launchd(etna_bin)
+        _install_launchd(runtime_python)
     elif system == "Windows":
-        _install_task_scheduler(etna_bin)
+        _install_task_scheduler(runtime_python)
     else:
-        print(f"{PREFIX}{orange}Unsupported OS for service install: {white}{light_grey}{system}{white}")
+        raise RuntimeError(f"Unsupported OS for service install: {system}")
 
 
-def _install_systemd(etna_bin: str):
+def _systemd_quote(value: str) -> str:
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _install_systemd(runtime_python: Path):
+    if not shutil.which("systemctl"):
+        raise RuntimeError("systemctl was not found; Etna requires a systemd user session on Linux")
+
     service_dir = Path.home() / ".config" / "systemd" / "user"
     service_dir.mkdir(parents=True, exist_ok=True)
     service_file = service_dir / "etna.service"
@@ -363,71 +467,119 @@ Description=Etna MCP Tool Server
 After=network.target
 
 [Service]
-ExecStart={etna_bin} start
+Type=simple
+ExecStart={_systemd_quote(str(runtime_python))} -m etna _serve
+Environment={_systemd_quote('ETNA_CONFIG_DIR=' + str(cfg.CONFIG_DIR))}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=default.target
 """
-    service_file.write_text(content)
-    subprocess.run(["systemctl", "--user", "daemon-reload"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["systemctl", "--user", "enable", "etna"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"{PREFIX}{green}systemd user service installed and enabled {green}✔{white}")
-    print(f"{PREFIX}{bright_yellow}Run: {white}{grey}systemctl --user start etna{white} {bright_yellow}to start it now.{white}")
+    subprocess.run(
+        ["systemctl", "--user", "stop", "etna.service"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    service_file.write_text(content, encoding="utf-8")
+    _run_checked(["systemctl", "--user", "daemon-reload"], description="systemd daemon-reload failed")
+    _run_checked(["systemctl", "--user", "enable", "etna.service"], description="Could not enable Etna")
+    _run_checked(["systemctl", "--user", "start", "etna.service"], description="Could not start Etna")
+    print(f"{PREFIX}{green}systemd user service installed and started {green}✔{white}")
 
 
-def _install_launchd(etna_bin: str):
+def _install_launchd(runtime_python: Path):
     agents_dir = Path.home() / "Library" / "LaunchAgents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     plist_file = agents_dir / "net.etna-mcp.etna.plist"
-    content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>net.etna-mcp.etna</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{etna_bin}</string>
-        <string>start</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-</dict>
-</plist>
-"""
-    plist_file.write_text(content)
-    subprocess.run(["launchctl", "load", str(plist_file)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print(f"{PREFIX}{green}LaunchAgent installed and loaded {green}✔{white}")
+    domain = f"gui/{os.getuid()}"
+    service = f"{domain}/net.etna-mcp.etna"
+
+    subprocess.run(
+        ["launchctl", "bootout", domain, str(plist_file)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    payload = {
+        "Label": "net.etna-mcp.etna",
+        "ProgramArguments": [str(runtime_python), "-m", "etna", "_serve"],
+        "EnvironmentVariables": {"ETNA_CONFIG_DIR": str(cfg.CONFIG_DIR)},
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ProcessType": "Background",
+    }
+    with open(plist_file, "wb") as f:
+        plistlib.dump(payload, f, sort_keys=False)
+
+    _run_checked(["launchctl", "bootstrap", domain, str(plist_file)], description="Could not bootstrap Etna LaunchAgent")
+    _run_checked(["launchctl", "kickstart", "-k", service], description="Could not start Etna LaunchAgent")
+    print(f"{PREFIX}{green}LaunchAgent installed and started {green}✔{white}")
 
 
-def _install_task_scheduler(etna_bin: str):
-    xml = f"""<?xml version="1.0" encoding="UTF-16"?>
+def _windows_user_sid() -> str:
+    result = _run_checked(
+        ["whoami", "/user", "/fo", "csv", "/nh"],
+        description="Could not determine the current Windows user SID",
+    )
+    row = next(csv.reader([result.stdout.strip()]))
+    if len(row) < 2 or not row[1].startswith("S-"):
+        raise RuntimeError("Could not parse the current Windows user SID")
+    return row[1]
+
+
+def _install_task_scheduler(runtime_python: Path):
+    from xml.sax.saxutils import escape
+
+    sid = escape(_windows_user_sid())
+    python_exe = escape(str(runtime_python))
+    xml = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{sid}</UserId>
+    </LogonTrigger>
   </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{sid}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{etna_bin}</Command>
-      <Arguments>start</Arguments>
+      <Command>{python_exe}</Command>
+      <Arguments>-m etna _serve</Arguments>
     </Exec>
   </Actions>
 </Task>
-"""
+'''
     tmp = cfg.CONFIG_DIR / "_etna_task.xml"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(xml, encoding="utf-16")
-    subprocess.run(
-        ["schtasks", "/Create", "/TN", "EtnaMCPServer", "/XML", str(tmp), "/F"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    tmp.unlink(missing_ok=True)
-    print(f"{PREFIX}{green}Task Scheduler entry created {green}✔{white}")
+    try:
+        subprocess.run(
+            ["schtasks", "/End", "/TN", "EtnaMCPServer"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _run_checked(
+            ["schtasks", "/Create", "/TN", "EtnaMCPServer", "/XML", str(tmp), "/F"],
+            description="Could not create Etna scheduled task",
+        )
+        _run_checked(
+            ["schtasks", "/Run", "/TN", "EtnaMCPServer"],
+            description="Could not start Etna scheduled task",
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+    print(f"{PREFIX}{green}Task Scheduler entry installed and started {green}✔{white}")

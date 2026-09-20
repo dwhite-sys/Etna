@@ -2,7 +2,8 @@
 etna/cli.py — Etna command-line interface
 
 Commands:
-  etna install                               First-time setup: venv + OS service (if needed)
+  etna init                                  Initialize/repair runtime + OS startup service
+  etna install                               Legacy alias for etna init when no target is given
   etna install <path/to/kit.py|pkg.ekp|skill.skill>  Install from local file (autodetects type)
   etna install <name>                        Install kit or skill from repo (autodetects)
   etna install <name==version>               Install specific version from repo
@@ -74,29 +75,6 @@ CDP_PORT = 9222
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
-def _check_install() -> dict:
-    return {
-        "uv":      shutil.which("uv") is not None,
-        "venv":    (cfg.VENV_DIR / ("Scripts" if sys.platform == "win32" else "bin") /
-                    ("python.exe" if sys.platform == "win32" else "python")).exists(),
-        "service": _service_registered(),
-    }
-
-
-def _service_registered() -> bool:
-    if sys.platform.startswith("linux"):
-        return (Path.home() / ".config" / "systemd" / "user" / "etna.service").exists()
-    elif sys.platform == "darwin":
-        return (Path.home() / "Library" / "LaunchAgents" / "net.etna-mcp.etna.plist").exists()
-    elif sys.platform == "win32":
-        result = subprocess.run(
-            ["schtasks", "/Query", "/TN", "EtnaMCPServer"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return result.returncode == 0
-    return False
-
-
 def _show_hints():
     print(f"{PREFIX}{green}Etna is ready {green}✔{white}\n")
     print(f"  {white}Install a kit    {white}  {light_blue}etna {light_green}install {grey}<name or path/kit.py>{white}")
@@ -106,38 +84,33 @@ def _show_hints():
     print()
 
 
-# ── install / update ──────────────────────────────────────────────────────────
+# ── init / install / update ───────────────────────────────────────────────────
+
+def cmd_init(args: list[str] | None = None):
+    """Initialize or repair Etna's managed runtime and per-user startup service."""
+    args = args or []
+    if args:
+        print(f"Usage: {light_blue}etna{white} {light_green}init{white}")
+        sys.exit(1)
+
+    print(f"{PREFIX}{grey}Initializing Etna...{white}")
+    try:
+        sm.install_service()
+    except Exception as exc:
+        print(f"{PREFIX}{red}Initialization failed: {white}{light_grey}{exc}{white}")
+        sys.exit(1)
+
+    if not sm.wait_for_server():
+        print(f"{PREFIX}{red}Etna service was installed but did not become healthy on port {BASE_PORT}.{white}")
+        sys.exit(1)
+
+    print(f"{PREFIX}{green}Etna initialized and running {green}✔{white}")
+    _show_hints()
+
 
 def cmd_install(args: list[str], is_update: bool = False):
     if not args and not is_update:
-        checks = _check_install()
-        if all(checks.values()):
-            _show_hints()
-            return
-        steps = []
-        if not checks["uv"]:
-            print(f"{PREFIX}{red}UV not found. {bright_yellow}Install it from: {cyan}https://github.com/astral-sh/uv{white}")
-            sys.exit(1)
-        if not checks["venv"]:
-            steps.append("venv")
-        if not checks["service"]:
-            steps.append("service")
-
-        total = len(steps)
-        for i, step in enumerate(steps):
-            _, _, bar, _ = progress_bar(i, total, separate=True)
-            spin = throbber(i)
-            print(f"{clear_line}{spin} {bar}{white} ({grey}{i}{white}/{grey}{total}{white})", end="\n")
-            print(f"{clear_line} {white}Setting up {light_blue}{step}{white}...", end="\r")
-            if step == "venv":
-                sm.ensure_venv()
-            elif step == "service":
-                sm.install_service()
-            print(f"{up}{clear_line}", end="\r")
-
-        # Collapse: move up past the 2 reserved lines, commit a single ✔ line
-        print(f"{up}{up}{clear_line}{PREFIX}{green}Etna setup complete {green}✔{white}")
-        print(f"{clear_line}", end="\r")
+        cmd_init([])
         return
 
     target = args[0]
@@ -1199,7 +1172,8 @@ def _print_help():
     row(f"{e} {W}status{W}",                                         "Server, browser, kits, and client summary")
 
     section("Install & update")
-    row(f"{e} {G}install{W}",                                        "First-time setup, or getting-started hints if ready")
+    row(f"{e} {G}init{W}",                                           "Initialize or repair Etna runtime + startup service")
+    row(f"{e} {G}install{W}",                                        "Legacy alias for init when no target is given")
     row(f"{e} {G}install{W} {gr}<path/kit.py|pkg.ekp|skill.skill>{W}", "Install from a local file (autodetects type)")
     row(f"{e} {G}install{W} {gr}<name>{W}",                          "Install kit or skill from the repo (autodetects)")
     row(f"{e} {G}install{W} {gr}<name==version>{W}",                 "Install a specific version from the repo")
@@ -1276,7 +1250,11 @@ def main():
     command = args[0].lower()
     rest    = args[1:]
 
-    if command == "install":
+    if command == "init":
+        cmd_init(rest)
+    elif command == "_serve":
+        sys.exit(sm.run_server_foreground(verbose="--verbose" in rest))
+    elif command == "install":
         cmd_install(rest)
     elif command == "update":
         cmd_update(rest)
@@ -1306,7 +1284,7 @@ def main():
         cmd_browser(rest)
     else:
         print(f"{PREFIX}{red}Unknown command: {white}'{grey}{command}{white}'")
-        print(f"{grey}Commands{white}: install, update, remove, kit, skill, search, list, status, start, stop, restart, compat, config, browser")
+        print(f"{grey}Commands{white}: init, install, update, remove, kit, skill, search, list, status, start, stop, restart, compat, config, browser")
         sys.exit(1)
 
 

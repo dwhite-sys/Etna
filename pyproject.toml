@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "etna-mcp"
-version = "1.0.0b38"
+version = "1.0.0b39"
 description = "A lightweight tool server for AI models — extend with drop-in kit files."
 authors = [{ name = "dwhite-sys" }]
 license = { text = "Apache-2.0" }

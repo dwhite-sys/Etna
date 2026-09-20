@@ -515,7 +515,7 @@ def _install_requirements(requirements: list[str], kit_name: str = "") -> bool:
         print(f"{clear_line}", end="\r")
 
         proc = subprocess.Popen(
-            ["uv", "pip", "install", "--python", str(venv_python)] + requirements,
+            [sys.executable, "-m", "uv", "pip", "install", "--python", str(venv_python)] + requirements,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

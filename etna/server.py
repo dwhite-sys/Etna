@@ -33,6 +33,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
+from etna import __version__
 from etna.utils.registry import (
     get_tools, get_tools_for_kit, extract_parameters, build_tool_schema, TOOLS
 )
@@ -297,6 +298,11 @@ def _safe_skill_file(skill_root: Path, relative_path: str):
     return target
 
 # ── Etna Protocol endpoints ───────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"service": "etna-mcp", "version": __version__, "status": "ok"}
+
 
 @app.get("/list_kits")
 def list_kits():
