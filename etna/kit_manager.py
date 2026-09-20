@@ -268,10 +268,15 @@ def install_kit(kit_path_str: str, config: dict, kits_dir: Path,
             print(f"{PREFIX}{grey}Aborted.{white}")
             return None
 
-    # Backup existing kit file during updates for rollback on dep failure
+    # Backup existing kit file during updates for rollback on dep failure.
+    # Capture old defaults so legacy persisted defaults can be separated from
+    # explicit user overrides.
     backup = None
     dest = kits_dir / kit_path.name
+    previous_defaults = {}
+
     if already_installed and dest.exists():
+        previous_defaults = parse_kit_metadata(dest).get("config", {})
         backup = dest.with_suffix(".py.bak")
         shutil.copy2(dest, backup)
 
@@ -289,12 +294,23 @@ def install_kit(kit_path_str: str, config: dict, kits_dir: Path,
         "deps_ok": True,
     }
 
-    # Write config defaults — preserve user-set values
+    # Persist explicit overrides only; defaults belong to the kit source.
+    existing_cfg = cfg.load_kit_config(kit_stem)
+    overrides = {}
+
+    for key, value in existing_cfg.items():
+        if key not in meta["config"]:
+            continue
+        if key in previous_defaults and value == previous_defaults[key]:
+            continue
+        if value == meta["config"][key]:
+            continue
+        overrides[key] = value
+
+    cfg.save_kit_config(kit_stem, overrides)
+
     if meta["config"]:
-        existing_cfg = cfg.load_kit_config(kit_stem)
-        merged = {**meta["config"], **existing_cfg}
-        cfg.save_kit_config(kit_stem, merged)
-        print(f"{PREFIX}{green}Config written: {white}{light_grey}{list(meta['config'].keys())}{white}")
+        print(f"{PREFIX}{green}Config schema: {white}{light_grey}{list(meta['config'].keys())}{white}")
 
     # Install requirements
     deps_ok = True

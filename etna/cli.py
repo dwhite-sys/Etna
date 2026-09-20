@@ -927,6 +927,42 @@ def _do_openwebui_sync(base_url: str, api_key: str, config: dict, silent: bool =
 
 # ── config ────────────────────────────────────────────────────────────────────
 
+def _coerce_config_value(raw: str, default):
+    if isinstance(default, bool):
+        value = raw.strip().lower()
+        if value in {"true", "1", "yes", "on"}:
+            return True
+        if value in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("expected true/false")
+
+    if isinstance(default, int):
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ValueError("expected integer") from exc
+
+    if isinstance(default, float):
+        try:
+            return float(raw)
+        except ValueError as exc:
+            raise ValueError("expected number") from exc
+
+    if isinstance(default, str):
+        return raw
+
+    raise ValueError(f"unsupported config type: {type(default).__name__}")
+
+
+def _reload_configured_kit(kit_stem: str, config: dict):
+    port = int(config.get("port") or BASE_PORT)
+    if not _port_open(port):
+        return
+
+    from etna.kit_manager import _reload_kit_in_server
+    _reload_kit_in_server(kit_stem, config)
+
+
 def cmd_config(args: list[str]):
     if len(args) < 2:
         print(f"Usage: {light_blue}etna{white} {grey}config {light_grey}<get|set|list|reset> <kit_name> [variable] [value]{white}")
@@ -944,7 +980,14 @@ def cmd_config(args: list[str]):
     kits_dir = cfg.kits_dir()
     kit_file = kits_dir / f"{kit_stem}.py"
     defaults = parse_kit_metadata(kit_file).get("config", {}) if kit_file.exists() else {}
-    saved    = cfg.load_kit_config(kit_stem)
+    raw_saved = cfg.load_kit_config(kit_stem)
+    saved = {
+        key: value
+        for key, value in raw_saved.items()
+        if key in defaults and value != defaults[key]
+    }
+    if saved != raw_saved:
+        cfg.save_kit_config(kit_stem, saved)
 
     if subcommand == "list":
         if not defaults:
@@ -970,12 +1013,24 @@ def cmd_config(args: list[str]):
         if len(args) < 4:
             print(f"Usage: {light_blue}etna{white} {grey}config set {light_grey}<kit_name> <variable> <value>{white}")
             sys.exit(1)
-        var, value = args[2], args[3]
+        var, raw_value = args[2], args[3]
         if var not in defaults:
             print(f"{PREFIX}{red}Unknown config variable {white}{light_grey}{var} {red}for kit {white}'{grey}{kit_stem}{white}'")
             sys.exit(1)
-        saved[var] = value
+
+        try:
+            value = _coerce_config_value(raw_value, defaults[var])
+        except ValueError as exc:
+            print(f"{PREFIX}{red}Invalid value for {white}{light_grey}{var}{white}: {light_grey}{exc}{white}")
+            sys.exit(1)
+
+        if value == defaults[var]:
+            saved.pop(var, None)
+        else:
+            saved[var] = value
+
         cfg.save_kit_config(kit_stem, saved)
+        _reload_configured_kit(kit_stem, config)
         print(f"{PREFIX}{green}Set {grey}{kit_stem}{white}.{light_grey}{var}{white} = {light_grey}{value!r}{white}")
 
     elif subcommand == "reset":
@@ -988,6 +1043,7 @@ def cmd_config(args: list[str]):
             sys.exit(1)
         saved.pop(var, None)
         cfg.save_kit_config(kit_stem, saved)
+        _reload_configured_kit(kit_stem, config)
         print(f"{PREFIX}{green}Reset {grey}{kit_stem}{white}.{light_grey}{var}{white} to default ({light_grey}{defaults[var]!r}{white})")
 
     else:

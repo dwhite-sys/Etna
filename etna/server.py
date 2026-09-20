@@ -8,10 +8,11 @@ Endpoints:
   POST /inspect_tool           Schema for a single tool
   POST /run_tool               Execute a tool, returns result directly
   POST /reload_kit             Hot-reload a kit without restart
-  POST /search_tools           Keyword search across all tool names/descriptions
 
-  GET  /list_skills            All installed general skills (name + description)
-  POST /read_skill             SKILL.md body for any skill (kit or general)
+  GET  /list_skills            Installed standalone skills + stable source identity
+  POST /read_skill             SKILL.md body for any skill (kit or standalone)
+  POST /list_skill_files       Recursively list files in a skill package
+  POST /read_skill_file        Read a text/binary file from a skill package
 
   POST /mcp                    MCP JSON-RPC 2.0 (initialize, tools/list, tools/call)
   GET  /mcp                    SSE keepalive stream
@@ -23,6 +24,8 @@ import json
 import asyncio
 import os
 import importlib
+import base64
+import mimetypes
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -63,16 +66,45 @@ def _apply_kit_configs():
         if not mod_name.startswith("kits."):
             continue
         kit_stem = mod_name.split(".", 1)[1]
+        previous_env_keys = set(getattr(mod, "_etna_config_env_keys", ()))
+
         if not hasattr(mod, "config") or not isinstance(mod.config, dict):
+            for key in previous_env_keys:
+                os.environ.pop(key, None)
+            mod._etna_config_env_keys = ()
             continue
-        saved = cfg.load_kit_config(kit_stem)
-        if saved:
-            mod.config.update(saved)
-        for key, val in mod.config.items():
-            os.environ.setdefault(key, str(val))
-        if saved:
-            for key, val in saved.items():
-                os.environ[key] = str(val)
+
+        # Kit source owns the schema/defaults. Disk stores overrides only.
+        defaults = getattr(mod, "_etna_config_defaults", None)
+        if not isinstance(defaults, dict):
+            defaults = dict(mod.config)
+            mod._etna_config_defaults = dict(defaults)
+
+        raw_saved = cfg.load_kit_config(kit_stem)
+        saved = {
+            key: value
+            for key, value in raw_saved.items()
+            if key in defaults and value != defaults[key]
+        }
+        if saved != raw_saved:
+            cfg.save_kit_config(kit_stem, saved)
+
+        effective = dict(defaults)
+        effective.update(saved)
+        mod.config.clear()
+        mod.config.update(effective)
+
+        current_env_keys = set(effective)
+        for key in previous_env_keys - current_env_keys:
+            os.environ.pop(key, None)
+        for key, val in effective.items():
+            os.environ[key] = str(val)
+
+            # Compatibility for older kits that snapshot config globals.
+            if key in mod.__dict__:
+                mod.__dict__[key] = val
+
+        mod._etna_config_env_keys = tuple(current_env_keys)
 
 
 _apply_kit_configs()
@@ -138,17 +170,12 @@ def _kit_stem_for_name(kit_name: str) -> str | None:
 # ── Skill helpers ─────────────────────────────────────────────────────────────
 
 def _parse_skill_meta(skill_dir: Path) -> dict | None:
-    """
-    Parse the frontmatter from a skill's SKILL.md.
-    Returns {name, description} or None if SKILL.md is missing or malformed.
-    """
+    """Parse a skill's SKILL.md frontmatter."""
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
         return None
 
     content = skill_md.read_text(encoding="utf-8")
-
-    # Parse YAML frontmatter between --- delimiters
     name = skill_dir.name
     description = ""
 
@@ -166,13 +193,12 @@ def _parse_skill_meta(skill_dir: Path) -> dict | None:
 
 
 def _skill_body(skill_dir: Path) -> str | None:
-    """Return the body of a SKILL.md (everything after the frontmatter)."""
+    """Return the body of SKILL.md, excluding frontmatter."""
     skill_md = skill_dir / "SKILL.md"
     if not skill_md.exists():
         return None
 
     content = skill_md.read_text(encoding="utf-8")
-
     if content.startswith("---"):
         end = content.find("---", 3)
         if end != -1:
@@ -182,29 +208,93 @@ def _skill_body(skill_dir: Path) -> str | None:
 
 
 def _kit_skill_dir(kit_stem: str) -> Path | None:
-    """Return the skill dir for a kit if it exists, else None."""
     path = cfg.kit_skill_path(kit_stem)
     if path.exists() and (path / "SKILL.md").exists():
         return path
     return None
 
 
-def _general_skill_dir(skill_name: str) -> Path | None:
-    """Return the general skill dir by name if it exists, else None."""
-    # Search by folder name and by SKILL.md name field
-    skills_root = cfg.SKILLS_DIR
-    if not skills_root.exists():
-        return None
-    for skill_dir in skills_root.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        if skill_dir.name == skill_name:
-            return skill_dir
-        meta = _parse_skill_meta(skill_dir)
-        if meta and meta["name"] == skill_name:
-            return skill_dir
-    return None
+def _skill_records() -> list[dict]:
+    records = []
 
+    if cfg.SKILLS_DIR.exists():
+        for skill_dir in sorted(cfg.SKILLS_DIR.iterdir()):
+            if not skill_dir.is_dir() or skill_dir.is_symlink():
+                continue
+            meta = _parse_skill_meta(skill_dir)
+            if meta:
+                records.append({
+                    **meta,
+                    "source": "skills",
+                    "stem": skill_dir.name,
+                    "_path": skill_dir,
+                })
+
+    if cfg.KIT_SKILLS_DIR.exists():
+        for skill_dir in sorted(cfg.KIT_SKILLS_DIR.iterdir()):
+            if not skill_dir.is_dir() or skill_dir.is_symlink():
+                continue
+            meta = _parse_skill_meta(skill_dir)
+            if meta:
+                records.append({
+                    **meta,
+                    "source": f"kits/{skill_dir.name}",
+                    "stem": skill_dir.name,
+                    "_path": skill_dir,
+                })
+
+    return records
+
+
+def _resolve_skill(skill_name: str, source: str | None = None):
+    records = _skill_records()
+    if source:
+        records = [
+            record for record in records
+            if record["source"] == source
+        ]
+
+    matches = [
+        record for record in records
+        if record["name"] == skill_name
+        or record["stem"] == skill_name
+    ]
+
+    if not matches:
+        return None, JSONResponse(
+            {"error": f"Skill '{skill_name}' not found"},
+            status_code=404,
+        )
+
+    if len(matches) > 1 and not source:
+        return None, JSONResponse(
+            {
+                "error": f"Skill '{skill_name}' exists in multiple sources",
+                "sources": [record["source"] for record in matches],
+            },
+            status_code=409,
+        )
+
+    return matches[0], None
+
+
+def _safe_skill_file(skill_root: Path, relative_path: str):
+    requested = Path(relative_path)
+    if requested.is_absolute() or requested.drive or ".." in requested.parts:
+        return None
+
+    root = skill_root.resolve()
+    target = (root / requested).resolve()
+
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+
+    if not target.is_file():
+        return None
+
+    return target
 
 # ── Etna Protocol endpoints ───────────────────────────────────────────────────
 
@@ -225,6 +315,7 @@ def inspect_kit(req: dict):
             skill_dir = _kit_skill_dir(stem)
             skill_meta = _parse_skill_meta(skill_dir) if skill_dir else None
             meta["skill"] = skill_meta["name"] if skill_meta else None
+            meta["skill_source"] = f"kits/{stem}" if skill_meta else None
             return meta
 
     return JSONResponse({"error": f"Kit '{kit_name}' not found"}, status_code=404)
@@ -305,7 +396,20 @@ def reload_kit(req: dict):
     try:
         if module_name in sys.modules:
             mod = sys.modules[module_name]
+            previous_env_keys = tuple(getattr(mod, "_etna_config_env_keys", ()))
+            previous_config_keys = tuple(
+                mod.config.keys()
+                if isinstance(getattr(mod, "config", None), dict)
+                else ()
+            )
+
+            mod.__dict__.pop("_etna_config_defaults", None)
+            mod.__dict__.pop("config", None)
+            for key in previous_config_keys:
+                mod.__dict__.pop(key, None)
+
             importlib.reload(mod)
+            mod._etna_config_env_keys = previous_env_keys
         else:
             importlib.import_module(module_name)
     except Exception as exc:
@@ -334,97 +438,140 @@ def unload_kit(req: dict):
     return {"kit_stem": stem, "tools_removed": removed}
 
 
-@app.post("/search_tools")
-def search_tools(req: dict):
-    query = req.get("query", "").lower().strip()
-    if not query:
-        return JSONResponse({"error": "Missing 'query' field"}, status_code=400)
-
-    keywords = query.split()
-    tools = get_tools()
-    results = []
-
-    for tool_name, func in tools.items():
-        doc = (func.__doc__ or "").lower()
-        searchable = f"{tool_name.lower()} {doc}"
-        score = sum(1 for kw in keywords if kw in searchable)
-        if score > 0:
-            results.append({
-                "kit": getattr(func, "_kit", None),
-                "tool": tool_name,
-                "_score": score,
-            })
-
-    results.sort(key=lambda x: x["_score"], reverse=True)
-    return {
-        "results": [{"kit": r["kit"], "tool": r["tool"]} for r in results]
-    }
-
+# Runtime ranking/search belongs to the client/harness. Etna exposes
+# deterministic registry and package primitives only.
 
 # ── Skill endpoints ───────────────────────────────────────────────────────────
 
 @app.get("/list_skills")
 def list_skills():
-    """
-    Return all installed general skills (name + description).
-    Kit skills are not included here — they are surfaced via inspect_kit.
-    """
-    skills_root = cfg.SKILLS_DIR
-    if not skills_root.exists():
-        return {"skills": []}
-
     result = []
-    for skill_dir in sorted(skills_root.iterdir()):
-        if not skill_dir.is_dir():
+
+    for record in _skill_records():
+        if record["source"] != "skills":
             continue
-        meta = _parse_skill_meta(skill_dir)
-        if meta:
-            result.append(meta)
+
+        result.append({
+            "name": record["name"],
+            "description": record["description"],
+            "source": record["source"],
+            "stem": record["stem"],
+        })
 
     return {"skills": result}
 
 
 @app.post("/read_skill")
 def read_skill(req: dict):
-    """
-    Return the SKILL.md body for any skill — general or kit.
-    Request:  { "skill": "<name>" }
-    Response: { "name": str, "body": str }
-
-    Searches general skills first, then kit skills.
-    """
     skill_name = req.get("skill")
+    source = req.get("source")
+
     if not skill_name:
         return JSONResponse({"error": "Missing 'skill' field"}, status_code=400)
 
-    # Check general skills first
-    skill_dir = _general_skill_dir(skill_name)
+    record, error = _resolve_skill(skill_name, source)
+    if error:
+        return error
 
-    # Fall back to kit skills
-    if skill_dir is None:
-        kit_skills_root = cfg.KIT_SKILLS_DIR
-        if kit_skills_root.exists():
-            for candidate in kit_skills_root.iterdir():
-                if not candidate.is_dir():
-                    continue
-                meta = _parse_skill_meta(candidate)
-                if meta and meta["name"] == skill_name:
-                    skill_dir = candidate
-                    break
-                # Also match by folder name (kit stem)
-                if candidate.name == skill_name:
-                    skill_dir = candidate
-                    break
-
-    if skill_dir is None:
-        return JSONResponse({"error": f"Skill '{skill_name}' not found"}, status_code=404)
-
-    body = _skill_body(skill_dir)
+    body = _skill_body(record["_path"])
     if body is None:
-        return JSONResponse({"error": f"SKILL.md missing for '{skill_name}'"}, status_code=404)
+        return JSONResponse(
+            {"error": f"SKILL.md missing for '{skill_name}'"},
+            status_code=404,
+        )
 
-    return {"name": skill_name, "body": body}
+    return {
+        "name": record["name"],
+        "source": record["source"],
+        "body": body,
+    }
 
+
+@app.post("/list_skill_files")
+def list_skill_files(req: dict):
+    skill_name = req.get("skill")
+    source = req.get("source")
+
+    if not skill_name:
+        return JSONResponse({"error": "Missing 'skill' field"}, status_code=400)
+
+    record, error = _resolve_skill(skill_name, source)
+    if error:
+        return error
+
+    root = record["_path"].resolve()
+    files = []
+
+    for candidate in root.rglob("*"):
+        if not candidate.is_file():
+            continue
+
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+
+        files.append(candidate.relative_to(root).as_posix())
+
+    files = sorted(
+        set(files),
+        key=lambda path: (path != "SKILL.md", path),
+    )
+
+    return {
+        "skill": record["name"],
+        "source": record["source"],
+        "files": files,
+    }
+
+
+@app.post("/read_skill_file")
+def read_skill_file(req: dict):
+    skill_name = req.get("skill")
+    source = req.get("source")
+    relative_path = req.get("file")
+
+    if not skill_name:
+        return JSONResponse({"error": "Missing 'skill' field"}, status_code=400)
+
+    if not relative_path:
+        return JSONResponse({"error": "Missing 'file' field"}, status_code=400)
+
+    record, error = _resolve_skill(skill_name, source)
+    if error:
+        return error
+
+    target = _safe_skill_file(
+        record["_path"],
+        str(relative_path),
+    )
+
+    if target is None:
+        return JSONResponse(
+            {"error": f"File '{relative_path}' not found"},
+            status_code=404,
+        )
+
+    data = target.read_bytes()
+    response = {
+        "skill": record["name"],
+        "source": record["source"],
+        "file": str(relative_path).replace("\\", "/"),
+    }
+
+    try:
+        response["content"] = data.decode("utf-8")
+        response["binary"] = False
+    except UnicodeDecodeError:
+        response["binary"] = True
+        response["contentType"] = (
+            mimetypes.guess_type(target.name)[0]
+            or "application/octet-stream"
+        )
+        response["base64"] = base64.b64encode(data).decode("ascii")
+
+    return response
 
 # ── MCP JSON-RPC 2.0 ─────────────────────────────────────────────────────────
 
