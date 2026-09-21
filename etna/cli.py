@@ -7,6 +7,7 @@ Commands:
   etna install <path/to/kit.py|pkg.ekp|skill.skill>  Install from local file (autodetects type)
   etna install <name>                        Install kit or skill from repo (autodetects)
   etna install <name==version>               Install specific version from repo
+  etna install vulcan                        Install the Vulcan desktop app
   etna update <kit_name>                    Update an installed kit (no prompt)
   etna update --all                         Update all installed kits from the repo
   etna remove <kit_or_skill_name>           Remove a kit or skill (autodetects)
@@ -108,12 +109,77 @@ def cmd_init(args: list[str] | None = None):
     _show_hints()
 
 
+def _install_vulcan():
+    import tempfile
+    import urllib.request
+
+    windows = os.name == "nt"
+    url = (
+        "https://raw.githubusercontent.com/dwhite-sys/vulcan/main/install.ps1"
+        if windows
+        else "https://raw.githubusercontent.com/dwhite-sys/vulcan/main/install.sh"
+    )
+    suffix = ".ps1" if windows else ".sh"
+
+    print(f"{PREFIX}{grey}Installing Vulcan...{white}")
+
+    path = None
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            script = response.read()
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(script)
+            path = Path(tmp.name)
+
+        if windows:
+            powershell = (
+                shutil.which("powershell.exe")
+                or shutil.which("pwsh.exe")
+                or shutil.which("powershell")
+                or shutil.which("pwsh")
+            )
+            if not powershell:
+                raise RuntimeError("PowerShell could not be found")
+
+            result = subprocess.run([
+                powershell,
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", str(path),
+            ])
+        else:
+            bash = shutil.which("bash")
+            if not bash:
+                raise RuntimeError("bash could not be found")
+
+            result = subprocess.run([bash, str(path)])
+
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+
+    except Exception as exc:
+        print(
+            f"{PREFIX}{red}Vulcan installation failed: "
+            f"{white}{light_grey}{exc}{white}"
+        )
+        sys.exit(1)
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+
 def cmd_install(args: list[str], is_update: bool = False):
     if not args and not is_update:
         cmd_init([])
         return
 
     target = args[0]
+
+    if not is_update and target.lower() == "vulcan":
+        _install_vulcan()
+        return
+
     config = cfg.load()
     kits_dir = cfg.kits_dir()
 
@@ -1177,6 +1243,7 @@ def _print_help():
     row(f"{e} {G}install{W} {gr}<path/kit.py|pkg.ekp|skill.skill>{W}", "Install from a local file (autodetects type)")
     row(f"{e} {G}install{W} {gr}<name>{W}",                          "Install kit or skill from the repo (autodetects)")
     row(f"{e} {G}install{W} {gr}<name==version>{W}",                 "Install a specific version from the repo")
+    row(f"{e} {G}install{W} {gr}vulcan{W}",                          "Install the Vulcan desktop app")
     row(f"{e} {G}update{W} {gr}<kit_name>{W}",                       "Update an installed kit (no prompt)")
     row(f"{e} {G}update{W} {gr}--all{W}",                            "Update all installed kits from the repo")
     row(f"{e} {R}remove{W} {gr}<kit_or_skill_name>{W}",              "Remove a kit or skill (autodetects)")

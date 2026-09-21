@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ETNA_PACKAGE="${ETNA_PACKAGE:-etna-mcp>=1.0.0b40}"
+ETNA_PACKAGE="${ETNA_PACKAGE:-etna-mcp>=1.0.0b41}"
 ETNA_PYTHON="${ETNA_PYTHON:-3.12}"
 
 say() {

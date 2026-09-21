@@ -98,6 +98,14 @@ etna install ntfy
 etna install ntfy==1.0.0b1
 ```
 
+Vulcan can also be installed directly through Etna:
+
+```
+etna install vulcan
+```
+
+This runs Vulcan's official installer for the current operating system. The desktop application then handles its normal graphical setup and runtime repair.
+
 ## CLI reference
 
 ```
@@ -107,6 +115,7 @@ etna install <path/kit.py>            Install a kit from a local file
 etna install <path/pkg.ekp>           Install a kit package (kit + skill)
 etna install <kit_name>               Install a kit from the curated repo
 etna install <kit_name>==<version>    Install a specific version from the repo
+etna install vulcan                    Install the Vulcan desktop app
 etna update <path/kit.py>            Update a kit (no prompt)
 etna update <kit_name>               Update a kit from the repo (no prompt)
 etna update --all                    Update all installed kits from the repo
