@@ -5,7 +5,7 @@ if ($env:OS -ne "Windows_NT") {
     throw "This installer is for Windows. On macOS or Linux, use install.sh."
 }
 
-$EtnaPackage = "etna-mcp>=1.0.0b39"
+$EtnaPackage = "etna-mcp>=1.0.0b40"
 if ($env:ETNA_PACKAGE) {
     $EtnaPackage = $env:ETNA_PACKAGE
 }

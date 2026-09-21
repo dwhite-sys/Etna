@@ -438,7 +438,10 @@ def _run_checked(cmd: list[str], *, description: str):
 def install_service():
     """Create or repair the current user's Etna startup service and start it now."""
     ensure_venv(refresh=True)
-    runtime_python = _venv_python().resolve()
+    # Keep the venv launcher path itself. On POSIX it normally symlinks to
+    # the underlying interpreter, but invoking through the venv path is what
+    # gives the service its managed Etna environment.
+    runtime_python = _venv_python()
     system = platform.system()
 
     if system == "Linux":
@@ -480,6 +483,22 @@ WantedBy=default.target
         ["systemctl", "--user", "stop", "etna.service"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+
+    # Vulcan versions predating Etna's native `init` lifecycle installed this
+    # drop-in for the old daemonizing `etna start` service. It overrides the
+    # foreground service semantics used by current Etna, so migrate it away.
+    legacy_dropin = (
+        service_dir
+        / "etna.service.d"
+        / "10-vulcan-runtime.conf"
+    )
+    if legacy_dropin.exists():
+        legacy_dropin.unlink()
+        try:
+            legacy_dropin.parent.rmdir()
+        except OSError:
+            pass
+
     service_file.write_text(content, encoding="utf-8")
     _run_checked(["systemctl", "--user", "daemon-reload"], description="systemd daemon-reload failed")
     _run_checked(["systemctl", "--user", "enable", "etna.service"], description="Could not enable Etna")
