@@ -224,8 +224,10 @@ Apache 2.0
 Run `etna compat chatgpt` to expose each installed kit as a separate personal
 plugin. Packages contain portable `plugin.json` and `mcp.json` files under
 `~/.codex/plugins/`; the catalog is `~/.agents/plugins/marketplace.json`. Each
-MCP server uses stdio with `etna start stdio <kit_stem>` (an absolute Etna
-executable path is used when available). Etna must already be running.
+MCP server uses a package-contained launcher for `etna start stdio <kit_stem>`.
+The launcher records the resolved Etna executable path when available, while
+the portable manifest uses the required contained `./` command. Etna must
+already be running.
 
 Kit stems, rather than display names, determine plugin identity. A short hash
 in the package name prevents collisions between stems with similar spelling.

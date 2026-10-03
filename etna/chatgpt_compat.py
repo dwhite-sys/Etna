@@ -4,11 +4,14 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
 MARKER = ".etna-plugin.json"
+PLUGIN_VERSION = "1.0.1"
 
 
 def _write_json(path: Path, value: dict):
@@ -21,6 +24,34 @@ def _write_json(path: Path, value: dict):
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def _write_launcher(directory: Path, executable: str, stem: str) -> str:
+    """Write a package-contained launcher accepted by the portable plugin schema."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        launcher = directory / "etna-stdio.cmd"
+        content = "@echo off\r\n" + subprocess.list2cmdline(
+            [executable, "start", "stdio", stem]
+        ) + "\r\n"
+    else:
+        launcher = directory / "etna-stdio"
+        content = (
+            "#!/bin/sh\nexec "
+            + " ".join(shlex.quote(value) for value in
+                       [executable, "start", "stdio", stem])
+            + "\n"
+        )
+
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".etna-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+            stream.write(content)
+        os.chmod(temporary, 0o755)
+        os.replace(temporary, launcher)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return "./" + launcher.name
 
 
 def _owner(path: Path):
@@ -94,29 +125,30 @@ def sync(config: dict, home: Path | None = None) -> Path:
         if name in names or ((directory.exists() or directory.is_symlink())
                              and managed.get(directory) != stem):
             raise ValueError(f"Plugin collision at {directory}; refusing to overwrite")
-        for filename in (MARKER, "plugin.json", "mcp.json"):
+        launcher_name = "etna-stdio.cmd" if os.name == "nt" else "etna-stdio"
+        for filename in (MARKER, "plugin.json", "mcp.json", launcher_name):
             target = directory / filename
             if target.is_symlink() or (target.exists() and not target.is_file()):
                 raise ValueError(f"Unsafe plugin file {target}; refusing to overwrite")
         packages.append((stem, info, name, directory))
 
-    command = shutil.which("etna") or "etna"
+    executable = shutil.which("etna") or "etna"
     entries = []
     for stem, info, name, directory in packages:
         display = info.get("kit_name") or stem
         description = info.get("kit_description") or f"Etna tools from {display}"
+        command = _write_launcher(directory, executable, stem)
         _write_json(directory / MARKER, {"owner": "etna", "kit_stem": stem})
         _write_json(directory / "plugin.json", {
             "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-            "name": name, "version": "1.0.0", "description": description,
+            "name": name, "version": PLUGIN_VERSION, "description": description,
             "extensions": {"com.openai": {"interface": {
                 "displayName": display, "shortDescription": description,
             }}},
         })
         _write_json(directory / "mcp.json", {
             "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-            "mcpServers": {name: {"type": "stdio", "command": command,
-                                  "args": ["start", "stdio", stem]}},
+            "mcpServers": {name: {"type": "stdio", "command": command}},
         })
         entries.append({
             "name": name,

@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,9 +30,15 @@ class ChatGPTCompatTests(unittest.TestCase):
             directory = self.home / entry['source']['path']
             manifest = json.loads((directory / 'plugin.json').read_text())
             self.assertIn('com.openai', manifest['extensions'])
+            self.assertEqual(manifest['version'], compat.PLUGIN_VERSION)
             server = next(iter(json.loads((directory / 'mcp.json').read_text())['mcpServers'].values()))
             self.assertEqual(server['type'], 'stdio')
-            self.assertEqual(server['args'][:2], ['start', 'stdio'])
+            self.assertTrue(server['command'].startswith('./'))
+            self.assertNotIn('args', server)
+            launcher = directory / server['command']
+            self.assertTrue(launcher.is_file())
+            self.assertTrue(os.access(launcher, os.X_OK))
+            self.assertIn('start stdio', launcher.read_text())
         self.config['kits']['web_kit']['kit_name'] = 'Renamed'
         compat.sync(self.config, self.home)
         self.assertEqual([e['name'] for e in first], [e['name'] for e in self.read()['plugins']])
@@ -39,6 +46,17 @@ class ChatGPTCompatTests(unittest.TestCase):
         compat.sync(self.config, self.home)
         self.assertEqual(self.read()['plugins'], [])
         self.assertEqual(list((self.home / '.codex/plugins').iterdir()), [])
+
+    def test_absolute_etna_path_is_kept_inside_contained_launcher(self):
+        executable = '/opt/Etna Folder/bin/etna'
+        with patch.object(compat.shutil, 'which', return_value=executable):
+            compat.sync({'kits': {'web': {'kit_name': 'Web'}}}, self.home)
+        entry = self.read()['plugins'][0]
+        directory = self.home / entry['source']['path']
+        server = next(iter(json.loads((directory / 'mcp.json').read_text())['mcpServers'].values()))
+        self.assertEqual(server['command'], './etna-stdio')
+        launcher = (directory / 'etna-stdio').read_text()
+        self.assertIn("'/opt/Etna Folder/bin/etna' start stdio web", launcher)
 
     def test_preserves_unrelated_and_dedupes_owned(self):
         compat.sync(self.config, self.home)
