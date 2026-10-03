@@ -43,6 +43,7 @@ Commands:
 
   etna compat                             Auto-detect and configure all clients
   etna compat claude                      Write kit entries to Claude Desktop config
+  etna compat chatgpt                     Create one ChatGPT Desktop plugin per kit
   etna compat lmstudio                    Write kit entries to LM Studio config
   etna compat openwebui <url> <api_key>   Register kits with OpenWebUI
 
@@ -284,7 +285,14 @@ def _sync_clients(config: dict):
         t = _threading.Thread(target=_spin_client, daemon=True); t.start()
         if name == "openwebui":
             _sync_openwebui(data, config)
-        elif name in ("claude", "lmstudio"):
+        elif name == "chatgpt":
+            try:
+                from etna.chatgpt_compat import sync
+                sync(config)
+                print(f"  ChatGPT Desktop: {light_green}✔ updated{white}")
+            except Exception as exc:
+                print(f"  ChatGPT Desktop: {red}✘ failed — {light_grey}{exc}{white}")
+        elif name in ("claude", "lmstudio", "cursor", "windsurf", "vscode", "continue"):
             _sync_stdio_client(name, data, config)
         else:
             _done[0] = True; t.join()
@@ -564,6 +572,23 @@ def cmd_compat(args: list[str]):
     elif target == "lmstudio":
         path = _lmstudio_config_path()
         _compat_write_stdio_config(path, "LM Studio", "lmstudio", servers_key="mcpServers")
+    elif target == "chatgpt":
+        from etna.chatgpt_compat import sync
+        try:
+            path = sync(cfg.load())
+        except (OSError, ValueError) as exc:
+            print(f"{PREFIX}{red}ChatGPT configuration failed: {exc}{white}")
+            sys.exit(1)
+        cfg.register_client("chatgpt", {})
+        print(f"{PREFIX}{light_green}Config updated: {path}{white}")
+        print(f"{PREFIX}{bright_yellow}Restart ChatGPT Desktop and refresh/install plugins from the personal marketplace.{white}")
+    elif target in ("cursor", "windsurf"):
+        path = _cursor_config_path() if target == "cursor" else _windsurf_config_path()
+        _compat_write_stdio_config(path, target.title(), target)
+    elif target == "vscode":
+        _compat_write_vscode_config(_vscode_config_path(), "VS Code", target)
+    elif target == "continue":
+        _compat_write_continue_config(_continue_config_path(), "Continue", target)
     elif target == "openwebui":
         if len(args) < 3:
             print(f"Usage: {light_blue}etna{white} {grey}compat openwebui {light_grey}<url> <api_key>{white}")
@@ -571,7 +596,7 @@ def cmd_compat(args: list[str]):
         _compat_openwebui(args[1], args[2])
     else:
         print(f"{PREFIX}{red}Unknown compat target: {white}'{grey}{target}{white}'")
-        print(f"{grey}Targets{white}: {grey}claude{white}, {grey}lmstudio{white}, {grey}openwebui{white}")
+        print(f"{grey}Targets{white}: {grey}claude{white}, {grey}lmstudio{white}, chatgpt, cursor, windsurf, vscode, continue, {grey}openwebui{white}")
         sys.exit(1)
 
 
@@ -1281,6 +1306,7 @@ def _print_help():
 
     section("Client compat")
     row(f"{e} {Y}compat{W}",                                         "Auto-detect and configure all clients")
+    row(f"{e} {Y}compat{W} {W}chatgpt{W}", "Create one ChatGPT Desktop plugin per kit")
     row(f"{e} {Y}compat{W} {O}claude{W}",                            "Write kit entries to Claude Desktop config")
     row(f"{e} {Y}compat{W} {Pu}lmstudio{W}",                         "Write kit entries to LM Studio config")
     row(f"{e} {Y}compat{W} {gr}cursor{W}",                           "Write kit entries to Cursor config")

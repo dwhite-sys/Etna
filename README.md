@@ -131,6 +131,7 @@ etna stop                            Stop the server
 etna restart                         Restart the server
 
 etna compat                          Auto-detect and configure all clients
+etna compat chatgpt                  Create one ChatGPT Desktop plugin per kit
 etna compat claude                   Write kit entries to Claude Desktop config
 etna compat lmstudio                 Write kit entries to LM Studio config
 etna compat cursor                   Write kit entries to Cursor config
@@ -217,3 +218,25 @@ Subdirectories (`references/`, `scripts/`, `assets/`) are optional and available
 ## License
 
 Apache 2.0
+
+### ChatGPT Desktop local plugins
+
+Run `etna compat chatgpt` to expose each installed kit as a separate personal
+plugin. Packages contain portable `plugin.json` and `mcp.json` files under
+`~/.codex/plugins/`; the catalog is `~/.agents/plugins/marketplace.json`. Each
+MCP server uses stdio with `etna start stdio <kit_stem>` (an absolute Etna
+executable path is used when available). Etna must already be running.
+
+Kit stems, rather than display names, determine plugin identity. A short hash
+in the package name prevents collisions between stems with similar spelling.
+Etna ownership markers identify packages for updates and stale removal.
+Unrelated catalog entries and plugin folders are preserved; malformed catalogs
+or collisions stop configuration rather than overwrite user data. After
+registration, kit install/update/remove automatically refreshes this catalog.
+
+Restart ChatGPT Desktop and refresh/install the plugins from the personal
+marketplace after configuration or changes. Entries request
+`INSTALLED_BY_DEFAULT`; actual loading depends on the host's plugin settings.
+Etna updates source packages, not ChatGPT's installed plugin cache. No HTTP
+conversion or developer-mode remote server registration is needed for these
+local packages. See the [OpenAI local plugin packaging documentation](https://developers.openai.com/plugins/build/plugins).
