@@ -106,6 +106,30 @@ class ChatGPTCompatTests(unittest.TestCase):
         self.assertFalse(duplicate.exists())
         self.assertEqual(len(self.read()['plugins']), 2)
 
+    def test_auto_detects_all_local_clients(self):
+        directories = ['.config/Claude', '.lmstudio', '.cursor',
+                       '.codeium/windsurf', '.config/Code/User', '.continue', '.codex']
+        for directory in directories:
+            (self.home / directory).mkdir(parents=True)
+        with patch.object(cli.Path, 'home', return_value=self.home), patch.object(cli.sys, 'platform', 'linux'), patch('builtins.input', return_value='y'), patch.object(cli, 'cmd_compat') as dispatch, contextlib.redirect_stdout(io.StringIO()):
+            cli._compat_auto()
+        self.assertEqual([call.args[0] for call in dispatch.call_args_list],
+                         [[name] for name in ['claude', 'lmstudio', 'cursor', 'windsurf', 'vscode', 'continue', 'chatgpt']])
+
+    def test_auto_individual_selection(self):
+        (self.home / '.codex').mkdir()
+        (self.home / '.continue').mkdir()
+        with patch.object(cli.Path, 'home', return_value=self.home), patch('builtins.input', side_effect=['n', 'n', 'y']), patch.object(cli, 'cmd_compat') as dispatch, contextlib.redirect_stdout(io.StringIO()):
+            cli._compat_auto()
+        dispatch.assert_called_once_with(['chatgpt'])
+
+    def test_auto_no_clients_creates_no_config(self):
+        with patch.object(cli.Path, 'home', return_value=self.home), patch.object(cli, 'cmd_compat') as dispatch, patch('builtins.input') as prompt, contextlib.redirect_stdout(io.StringIO()):
+            cli._compat_auto()
+        dispatch.assert_not_called()
+        prompt.assert_not_called()
+        self.assertEqual(list(self.home.iterdir()), [])
+
     def test_failed_compat_does_not_register(self):
         with patch.object(cli.cfg, 'load', return_value=self.config), patch.object(cli.cfg, 'register_client') as register, patch.object(compat, 'sync', side_effect=ValueError('bad config')), contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as result:

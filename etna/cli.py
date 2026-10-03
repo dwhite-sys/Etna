@@ -603,17 +603,26 @@ def cmd_compat(args: list[str]):
 def _compat_auto():
     found = []
 
-    claude_path = _claude_config_path()
-    if claude_path.parent.exists():
-        found.append(("claude", "Claude Desktop", claude_path, "mcpServers"))
+    candidates = [
+        ("claude", "Claude Desktop", _claude_config_path(), "mcpServers"),
+        ("lmstudio", "LM Studio", _lmstudio_config_path(), "mcpServers"),
+        ("cursor", "Cursor", _cursor_config_path(), "mcpServers"),
+        ("windsurf", "Windsurf", _windsurf_config_path(), "mcpServers"),
+        ("vscode", "VS Code", _vscode_config_path(), "mcp.servers"),
+        ("continue", "Continue", _continue_config_path(), "modelContextProtocolServers"),
+    ]
+    for candidate in candidates:
+        if candidate[2].parent.is_dir():
+            found.append(candidate)
 
-    lmstudio_path = _lmstudio_config_path()
-    if lmstudio_path.parent.exists():
-        found.append(("lmstudio", "LM Studio", lmstudio_path, "mcpServers"))
+    home = Path.home()
+    if (home / ".codex").is_dir():
+        found.append(("chatgpt", "ChatGPT Desktop / Codex",
+                      home / ".agents" / "plugins" / "marketplace.json", None))
 
     if not found:
         print(f"{PREFIX}{orange}No supported clients detected automatically.{white}")
-        print(f"{PREFIX}{bright_yellow}Use: {light_blue}etna{white} {grey}compat claude{white} / {grey}lmstudio{white} / {grey}openwebui{white} {bright_yellow}to configure manually.{white}")
+        print(f"{PREFIX}{bright_yellow}Use: {light_blue}etna{white} {grey}compat claude{white} / {grey}lmstudio{white} / chatgpt / cursor / windsurf / vscode / continue / {grey}openwebui{white} {bright_yellow}to configure manually.{white}")
         return
 
     print(f"{PREFIX}{green}Detected:{white}")
@@ -623,14 +632,14 @@ def _compat_auto():
     answer = input(f"\n{PREFIX}{bright_yellow}Configure all? {white}[{light_green}y{white}/{red}n{white}]: ").strip().lower()
     if answer == "y":
         for target, name, path, servers_key in found:
-            _compat_write_stdio_config(path, name, target, servers_key=servers_key)
+            cmd_compat([target])
     else:
         for target, name, path, servers_key in found:
             ans = input(f"{PREFIX}{bright_yellow}Configure {grey}{name}{bright_yellow}? {white}[{light_green}y{white}/{red}n{white}]: ").strip().lower()
             if ans == "y":
-                _compat_write_stdio_config(path, name, target, servers_key=servers_key)
+                cmd_compat([target])
             else:
-                print(f"{PREFIX}{grey}Skipped {white}(already registered){white}: {grey}{name}{white}")
+                print(f"{PREFIX}{grey}Skipped: {grey}{name}{white}")
 
     print(f"\n{PREFIX}{bright_yellow}Restart any configured clients for changes to take effect.{white}")
 

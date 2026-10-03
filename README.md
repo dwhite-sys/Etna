@@ -240,3 +240,11 @@ marketplace after configuration or changes. Entries request
 Etna updates source packages, not ChatGPT's installed plugin cache. No HTTP
 conversion or developer-mode remote server registration is needed for these
 local packages. See the [OpenAI local plugin packaging documentation](https://developers.openai.com/plugins/build/plugins).
+
+`etna compat` detects existing configuration directories for Claude Desktop,
+LM Studio, Cursor, Windsurf, VS Code, and Continue, plus `~/.codex` for the
+shared ChatGPT Desktop/Codex plugin setup. It offers to configure all detected
+clients or select them individually, using the same writers as explicit
+`etna compat <client>` commands. Detection is based on configuration directories,
+not an executable scan; use the explicit command for a client that has not yet
+created its directory. OpenWebUI requires an explicit URL and API key.
