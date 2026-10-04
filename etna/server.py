@@ -54,7 +54,8 @@ if str(cfg.CONFIG_DIR) not in sys.path:
 cfg.kits_dir()
 
 import glob as _glob
-_venv_site = _glob.glob(str(cfg.VENV_DIR / "lib" / "python*" / "site-packages"))
+_venv_site = ([str(cfg.VENV_DIR / "Lib" / "site-packages")] if sys.platform == "win32"
+              else _glob.glob(str(cfg.VENV_DIR / "lib" / "python*" / "site-packages")))
 for _p in _venv_site:
     if _p not in sys.path:
         sys.path.insert(0, _p)

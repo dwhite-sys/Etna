@@ -250,3 +250,42 @@ clients or select them individually, using the same writers as explicit
 `etna compat <client>` commands. Detection is based on configuration directories,
 not an executable scan; use the explicit command for a client that has not yet
 created its directory. OpenWebUI requires an explicit URL and API key.
+
+## Windows 11 diagnostics (1.0.0b45)
+
+Upgrade using the same Python installation that runs Etna, then repair the runtime:
+
+```powershell
+py -m pip install --upgrade --pre etna-mcp==1.0.0b45
+py -m etna --version
+py -m etna init
+py -m etna status
+py -m etna logs
+```
+
+If you installed with uv instead of pip, use `uv tool upgrade etna-mcp`, then
+`etna init`. Etna runs natively on Windows; WSL is not required. Its scheduled task
+starts at your user login, uses the managed interpreter, and preserves the config
+location used during initialization. Existing generated files with Windows-1252
+encoding are repaired without deleting kits or their configuration.
+
+`etna logs` includes version, Python, OS, config directory, and the last 100 lines
+of each retained log. Background startup writes `server.log`; the Windows
+scheduled task writes `service.log`. The default location is `%APPDATA%\Etna`
+(or `ETNA_CONFIG_DIR` if overridden). For a failure before server launch, capture
+initialization output too:
+
+```powershell
+py -m etna init *> etna-init.log
+py -m etna logs > etna-logs.txt
+```
+
+Send those files with the error screenshot. After initialization works, test
+stop/start/restart, close the terminal while the server is running, and sign out
+and back in to verify login startup. Then test kit installation, one tool call,
+client connection, and `etna browser start` / `etna browser stop`.
+
+Release CI exercises Windows and Linux on Python 3.11, 3.12, and 3.14, including
+legacy encoding repair, paths with spaces and Unicode, actual managed runtime
+startup/shutdown, health checks, and an MCP tool call. Scheduled login and desktop
+client/browser behavior still require testing on a Windows 11 device.

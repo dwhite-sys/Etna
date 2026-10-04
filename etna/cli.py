@@ -539,7 +539,11 @@ def cmd_start(args: list[str]):
         run_shim(port, kit_stem)
         return
 
-    port = sm.start_server(config, verbose=verbose)
+    try:
+        port = sm.start_server(config, verbose=verbose)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"{PREFIX}{red}Server failed to start: {exc}{white}", file=sys.stderr)
+        sys.exit(1)
     config["port"] = port
     cfg.save(config)
 
@@ -644,9 +648,17 @@ def _compat_auto():
     print(f"\n{PREFIX}{bright_yellow}Restart any configured clients for changes to take effect.{white}")
 
 
+def _etna_executable() -> str:
+    executable = shutil.which("etna")
+    if executable:
+        return str(Path(executable).absolute())
+    candidate = Path(sys.executable).parent / ("etna.exe" if sys.platform == "win32" else "etna")
+    return str(candidate) if candidate.is_file() else "etna"
+
+
 def _claude_config_path() -> Path:
     if sys.platform == "win32":
-        base = Path.home() / "AppData" / "Roaming" / "Claude"
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "Claude"
     else:
@@ -668,7 +680,7 @@ def _windsurf_config_path() -> Path:
 
 def _vscode_config_path() -> Path:
     if sys.platform == "win32":
-        base = Path.home() / "AppData" / "Roaming" / "Code" / "User"
+        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Code" / "User"
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / "Code" / "User"
     else:
@@ -711,7 +723,7 @@ def _compat_write_vscode_config(config_path: Path, colored_name: str, client_key
     existing = {}
     if config_path.exists():
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8-sig") as f:
                 existing = json.load(f)
         except Exception:
             if not silent:
@@ -735,6 +747,9 @@ def _compat_write_vscode_config(config_path: Path, colored_name: str, client_key
         if not silent:
             print(f"{PREFIX}{red}Removed stale: {grey}{name}{white}")
 
+    for entry in mcp_servers.values():
+        if entry.get("args", [])[:2] == ["start", "stdio"]:
+            entry["command"] = _etna_executable()
     already = {
         entry["args"][2]
         for entry in mcp_servers.values()
@@ -748,7 +763,7 @@ def _compat_write_vscode_config(config_path: Path, colored_name: str, client_key
         display_name = info.get("kit_name", kit_stem)
         if kit_stem not in already:
             mcp_servers[display_name] = {
-                "command": "etna",
+                "command": _etna_executable(),
                 "args": ["start", "stdio", kit_stem],
             }
             if not silent:
@@ -758,7 +773,7 @@ def _compat_write_vscode_config(config_path: Path, colored_name: str, client_key
     existing["mcp"] = mcp_section
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)
     os.replace(tmp, config_path)
 
@@ -780,7 +795,7 @@ def _compat_write_continue_config(config_path: Path, colored_name: str, client_k
     existing = {}
     if config_path.exists():
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8-sig") as f:
                 existing = json.load(f)
         except Exception:
             if not silent:
@@ -792,7 +807,7 @@ def _compat_write_continue_config(config_path: Path, colored_name: str, client_k
     # Remove stale Etna entries — fingerprint: command == "etna", args[1] == "stdio"
     def _is_etna(s):
         t = s.get("transport", {})
-        return t.get("command") == "etna" and len(t.get("args", [])) >= 2 and t["args"][0] == "start" and t["args"][1] == "stdio"
+        return Path(t.get("command", "")).name.lower() in ("etna", "etna.exe") and len(t.get("args", [])) >= 2 and t["args"][0] == "start" and t["args"][1] == "stdio"
 
     def _stem(s):
         args = s.get("transport", {}).get("args", [])
@@ -804,6 +819,9 @@ def _compat_write_continue_config(config_path: Path, colored_name: str, client_k
             print(f"{PREFIX}{red}Removed stale: {grey}{_stem(s)}{white}")
     servers = [s for s in servers if not (_is_etna(s) and _stem(s) not in kits)]
 
+    for entry in servers:
+        if _is_etna(entry):
+            entry["transport"]["command"] = _etna_executable()
     existing_stems = {_stem(s) for s in servers if _is_etna(s)}
 
     for kit_stem, info in kits.items():
@@ -812,7 +830,7 @@ def _compat_write_continue_config(config_path: Path, colored_name: str, client_k
             servers.append({
                 "transport": {
                     "type": "stdio",
-                    "command": "etna",
+                    "command": _etna_executable(),
                     "args": ["start", "stdio", kit_stem],
                 }
             })
@@ -822,7 +840,7 @@ def _compat_write_continue_config(config_path: Path, colored_name: str, client_k
     existing["modelContextProtocolServers"] = servers
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)
     os.replace(tmp, config_path)
 
@@ -839,7 +857,7 @@ def _write_stdio_config(config_path: Path, servers_key: str, config: dict, silen
     existing = {}
     if config_path.exists():
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8-sig") as f:
                 existing = json.load(f)
         except Exception as e:
             if not silent:
@@ -861,6 +879,9 @@ def _write_stdio_config(config_path: Path, servers_key: str, config: dict, silen
         if not silent:
             print(f"{PREFIX}{red}Removed stale entry: {white}{grey}{name}{white}")
 
+    for entry in mcp_servers.values():
+        if entry.get("args", [])[:2] == ["start", "stdio"]:
+            entry["command"] = _etna_executable()
     already_registered = {
         entry["args"][2]
         for entry in mcp_servers.values()
@@ -877,7 +898,7 @@ def _write_stdio_config(config_path: Path, servers_key: str, config: dict, silen
                 print(f"{PREFIX}{grey}Skipped {white}(already registered){white}: {grey}{display_name}{white}")
             continue
         mcp_servers[display_name] = {
-            "command": "etna",
+            "command": _etna_executable(),
             "args": ["start", "stdio", kit_stem],
         }
         if not silent:
@@ -885,7 +906,7 @@ def _write_stdio_config(config_path: Path, servers_key: str, config: dict, silen
 
     existing[servers_key] = mcp_servers
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(existing, f, indent=2)
 
 
@@ -1197,6 +1218,8 @@ def _browser_start():
          "--no-default-browser-check"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        **sm._background_process_options(),
     )
     cfg.CHROME_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     cfg.CHROME_PID_FILE.write_text(str(proc.pid))
@@ -1220,7 +1243,7 @@ def _browser_stop():
     try:
         pid = int(pid_file.read_text().strip())
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             import signal
@@ -1294,6 +1317,8 @@ def _print_help():
     row(f"{e} {G}kit{W} {Pu}config{W} {G}set{W} {gr}<kit> <var> <val>{W}", "Set a kit config value")
     row(f"{e} {G}kit{W} {Pu}config{W} {R}reset{W} {gr}<kit> <var>{W}", "Reset a kit config value to default")
 
+    row(f"{e} {W}logs{W}", "Show diagnostic context and retained server logs")
+
     section("Skills")
     row(f"{e} {G}skill{W} {W}list{W}",                               "List installed general skills")
     row(f"{e} {G}skill{W} {R}remove{W} {gr}<skill_stem>{W}",         "Remove an installed skill")
@@ -1332,7 +1357,24 @@ def _print_help():
     print()
 
 
+def cmd_logs(args: list[str]):
+    """Print local diagnostic context and retained server logs."""
+    from etna import __version__
+    import platform
+    print(f"Etna {__version__}; Python {sys.version.split()[0]}; {platform.platform()}")
+    print(f"Config directory: {cfg.CONFIG_DIR}")
+    for name in ("server.log", "service.log"):
+        path = cfg.CONFIG_DIR / name
+        print(f"\n--- {path} ---")
+        if path.exists():
+            print("\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]))
+        else:
+            print("No log yet")
+
+
 def main():
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8")
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
@@ -1370,6 +1412,8 @@ def main():
         cmd_kit(rest)
     elif command == "skill":
         cmd_skill(rest)
+    elif command == "logs":
+        cmd_logs(rest)
     elif command == "status":
         cmd_status(rest)
     elif command == "start":
@@ -1386,7 +1430,7 @@ def main():
         cmd_browser(rest)
     else:
         print(f"{PREFIX}{red}Unknown command: {white}'{grey}{command}{white}'")
-        print(f"{grey}Commands{white}: init, install, update, remove, kit, skill, search, list, status, start, stop, restart, compat, config, browser")
+        print(f"{grey}Commands{white}: init, install, update, remove, kit, skill, search, list, status, logs, start, stop, restart, compat, config, browser")
         sys.exit(1)
 
 

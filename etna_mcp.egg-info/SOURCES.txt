@@ -1,6 +1,9 @@
 README.md
 pyproject.toml
+setup.cfg
 etna/__init__.py
+etna/__main__.py
+etna/chatgpt_compat.py
 etna/cli.py
 etna/config.py
 etna/console.py
@@ -17,3 +20,5 @@ etna_mcp.egg-info/dependency_links.txt
 etna_mcp.egg-info/entry_points.txt
 etna_mcp.egg-info/requires.txt
 etna_mcp.egg-info/top_level.txt
+tests/test_chatgpt_compat.py
+tests/test_windows_compat.py

@@ -29,7 +29,7 @@ BASE_PORT = 8467
 
 # ── Venv self-repair ──────────────────────────────────────────────────────────
 
-CORE_DEPS = ["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0", "requests>=2.31.0"]
+CORE_DEPS = ["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0", "requests>=2.31.0", "packaging>=24.0", "uv>=0.4.0"]
 
 
 def _uv_command() -> list[str]:
@@ -122,7 +122,8 @@ def _venv_site_packages() -> Path:
     """Return the managed runtime's purelib directory."""
     result = subprocess.run(
         [str(_venv_python()), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, encoding="utf-8", check=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
     return Path(result.stdout.strip())
 
@@ -157,24 +158,15 @@ def _write_utils_shim():
     Write a top-level utils.py into the venv's site-packages so that
     kit files can do 'from utils import tool' regardless of working directory.
     """
-    import glob
-    venv = cfg.VENV_DIR
-    # Find site-packages inside the venv
-    pattern = str(venv / "lib" / "python*" / "site-packages")
-    matches = glob.glob(pattern)
-    if not matches:
-        # Windows layout
-        matches = glob.glob(str(venv / "Lib" / "site-packages"))
-    if not matches:
-        return
-    site_packages = Path(matches[0])
+    site_packages = _venv_site_packages()
     shim = site_packages / "utils.py"
     shim.write_text(
-        "# Etna utils shim — allows kits to do 'from utils import tool'\n"
+        "# Etna utils shim - allows kits to do 'from utils import tool'\n"
         "from etna.utils.registry import (\n"
         "    tool, get_tools, get_tools_for_kit,\n"
         "    extract_parameters, build_tool_schema, TOOLS,\n"
-        ")\n"
+        ")\n",
+        encoding="utf-8",
     )
 
 
@@ -250,98 +242,62 @@ def start_server(config: dict, verbose: bool = False) -> int:
 
     ensure_venv()
 
-    env = os.environ.copy()
-    env["ETNA_CONFIG_DIR"] = str(cfg.CONFIG_DIR)
-
+    env = {**os.environ, "ETNA_CONFIG_DIR": str(cfg.CONFIG_DIR),
+           "PYTHONIOENCODING": "utf-8"}
     cmd = [str(_venv_python()), "-m", "uvicorn", "etna.server:app",
            "--host", "0.0.0.0", "--port", str(port),
            "--log-level", "info" if verbose else "error"]
-
-    import tempfile as _tf
-    stderr_file = open(_tf.mktemp(), 'w') if not verbose else None
-
-    proc = subprocess.Popen(
-        cmd, env=env,
-        stdout=subprocess.DEVNULL if not verbose else None,
-        stderr=stderr_file if not verbose else None,
-    )
-    cfg.PID_FILE.write_text(str(proc.pid))
-
+    log_path = cfg.CONFIG_DIR / "server.log"
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     hide_cursor()
     try:
-        for i in range(40):
-            time.sleep(0.25)
-            _, _, bar, _ = progress_bar(i, 40, separate=True)
-            spin = throbber(i)
-            print(f"{clear_line}{white}{spin}{white} {orange}Starting server...{white} {bar}{white}", end="\r")
-            if _port_open(port):
-                print(f"{clear_line}{PREFIX}{light_green}Server running on {cyan}http://localhost:{port}{white}")
-                print(f"{PREFIX}{light_green}Etna protocol: {cyan}http://localhost:{port}/list_kits{white}")
-                print(f"{PREFIX}{light_green}MCP protocol:  {cyan}http://localhost:{port}/mcp{white}")
-                if stderr_file and not stderr_file.closed:
-                    stderr_file.close()
-                return port
-        else:
-            # Server didn't start — read stderr and decide if we can self-repair
-            err = ""
-            if stderr_file:
-                stderr_file.flush()
-                stderr_file.close()
-                try:
-                    with open(stderr_file.name) as f:
-                        err = f.read().strip()
-                except Exception:
-                    pass
-
-            _venv_errors = (
-                "no module named",
-                "importerror",
-                "cannot import",
-                "modulenotfounderror",
-                "_pydantic_core",
-                "so: cannot open",
-                "invalid elf",
-            )
-            is_venv_broken = any(e in err.lower() for e in _venv_errors)
-
-            if is_venv_broken:
-                print(f"{clear_line}{PREFIX}{orange}Broken venv detected — rebuilding...{white}")
-                show_cursor()
-                # Nuke the venv and rebuild
-                import shutil as _shutil
-                if cfg.VENV_DIR.exists():
-                    _shutil.rmtree(cfg.VENV_DIR)
-                ensure_venv()
-                hide_cursor()
-                # Retry launching
-                proc2 = subprocess.Popen(
-                    cmd, env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+        for attempt in range(2):
+            # A persistent binary log accepts child output regardless of locale.
+            with log_path.open("wb") as log:
+                proc = subprocess.Popen(
+                    cmd, env=env, stdin=subprocess.DEVNULL,
+                    stdout=None if verbose else subprocess.DEVNULL,
+                    stderr=None if verbose else log,
+                    **_background_process_options(verbose),
                 )
-                cfg.PID_FILE.write_text(str(proc2.pid))
+                cfg.PID_FILE.write_text(str(proc.pid), encoding="ascii")
                 for i in range(40):
+                    if proc.poll() is not None:
+                        break
+                    if _is_etna_server(port):
+                        print(f"{clear_line}{PREFIX}{light_green}Server running on {cyan}http://localhost:{port}{white}")
+                        return port
                     time.sleep(0.25)
                     _, _, bar, _ = progress_bar(i, 40, separate=True)
-                    spin = throbber(i)
-                    print(f"{clear_line}{white}{spin}{white} {orange}Starting server...{white} {bar}{white}", end="\r")
-                    if _port_open(port):
-                        print(f"{clear_line}{PREFIX}{light_green}Server running on {cyan}http://localhost:{port}{white}")
-                        print(f"{PREFIX}{light_green}Etna protocol: {cyan}http://localhost:{port}/list_kits{white}")
-                        print(f"{PREFIX}{light_green}MCP protocol:  {cyan}http://localhost:{port}/mcp{white}")
-                        return port
-                print(f"{clear_line}{PREFIX}{red}Server failed to start after venv rebuild.{white}")
-            else:
-                print(f"{clear_line}{PREFIX}{red}Server failed to start.{white}")
-                if err:
-                    lines = [l for l in err.splitlines() if l.strip() and not l.startswith(" ")]
-                    print(f"{PREFIX}{red}{lines[-1] if lines else err[-200:]}{white}")
+                    print(f"{clear_line}{orange}Starting server...{white} {bar}", end="\r")
+                # Release the Windows interpreter and log handles before repair.
+                if proc.poll() is None:
+                    proc.terminate()
+                proc.wait(timeout=10)
+            cfg.PID_FILE.unlink(missing_ok=True)
+            err = log_path.read_text(encoding="utf-8", errors="replace").strip()
+            broken = any(message in err.lower() for message in (
+                "no module named", "importerror", "cannot import",
+                "modulenotfounderror", "_pydantic_core", "invalid elf",
+                "dll load failed", "not a valid win32 application",
+            ))
+            if attempt == 0 and broken:
+                print(f"{clear_line}{PREFIX}{orange}Broken runtime detected - rebuilding...{white}")
+                shutil.rmtree(cfg.VENV_DIR)
+                ensure_venv()
+                continue
+            detail = err.splitlines()[-1] if err else "Server exited or health check timed out"
+            raise RuntimeError(f"{detail}. See {log_path}")
     finally:
         show_cursor()
-        if stderr_file and not stderr_file.closed:
-            stderr_file.close()
 
-    return port
+
+def _background_process_options(verbose: bool = False) -> dict:
+    if verbose:
+        return {}
+    if sys.platform == "win32":
+        return {"creationflags": 0x00000008 | 0x00000200}  # detached + new process group
+    return {"start_new_session": True}
 
 
 def stop_server(config: dict):
@@ -437,6 +393,12 @@ def _run_checked(cmd: list[str], *, description: str):
 
 def install_service():
     """Create or repair the current user's Etna startup service and start it now."""
+    if platform.system() == "Windows":
+        subprocess.run(["schtasks", "/End", "/TN", "EtnaMCPServer"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Task Scheduler ends asynchronously; wait for the old interpreter.
+        if cfg.PID_FILE.exists():
+            stop_server(cfg.load())
     ensure_venv(refresh=True)
     # Keep the venv launcher path itself. On POSIX it normally symlinks to
     # the underlying interpreter, but invoking through the venv path is what
@@ -549,7 +511,21 @@ def _install_task_scheduler(runtime_python: Path):
     from xml.sax.saxutils import escape
 
     sid = escape(_windows_user_sid())
-    python_exe = escape(str(runtime_python))
+    python_exe = escape(str(runtime_python.with_name("pythonw.exe")))
+    launcher = cfg.CONFIG_DIR / "service_launcher.py"
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text(
+        "import os, sys\n"
+        + "os.environ['ETNA_CONFIG_DIR'] = " + repr(str(cfg.CONFIG_DIR.resolve())) + "\n"
+        + "os.environ['PYTHONIOENCODING'] = 'utf-8'\n"
+        + "sys.stdin = open(os.devnull, encoding='utf-8')\n"
+        + "sys.stdout = sys.stderr = open(" + repr(str(cfg.CONFIG_DIR.resolve() / "service.log")) + ", 'a', encoding='utf-8', buffering=1)\n"
+        + "from etna.server_manager import run_server_foreground\n"
+        + "raise SystemExit(run_server_foreground())\n",
+        encoding="utf-8",
+    )
+    arguments = escape(subprocess.list2cmdline([str(launcher.resolve())]))
+    working_directory = escape(str(cfg.CONFIG_DIR.resolve()))
     xml = f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
@@ -578,7 +554,8 @@ def _install_task_scheduler(runtime_python: Path):
   <Actions Context="Author">
     <Exec>
       <Command>{python_exe}</Command>
-      <Arguments>-m etna _serve</Arguments>
+      <Arguments>{arguments}</Arguments>
+      <WorkingDirectory>{working_directory}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>

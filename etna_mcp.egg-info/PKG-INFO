@@ -1,13 +1,13 @@
 Metadata-Version: 2.4
 Name: etna-mcp
-Version: 1.0.0b37
-Summary: A lightweight, Docker-free tool server for AI models — extend with drop-in kit files.
+Version: 1.0.0b45
+Summary: A lightweight tool server for AI models — extend with drop-in kit files.
 Author: dwhite-sys
 License: Apache-2.0
 Project-URL: Homepage, https://github.com/dwhite-sys/Etna
 Project-URL: Repository, https://github.com/dwhite-sys/Etna
 Project-URL: Issues, https://github.com/dwhite-sys/Etna/issues
-Keywords: mcp,model context protocol,llm,tools,kit,claude,openwebui,lm studio,etna
+Keywords: mcp,model context protocol,llm,tools,kit,claude,openwebui,lm studio,etna,ai
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
 Classifier: License :: OSI Approved :: Apache Software License
@@ -101,12 +101,12 @@ skill/             ← skill folder (optional)
 
 ```
 pip install etna-mcp
-etna install
+etna init
 ```
 
-`etna install` with no arguments checks whether everything is in place and sets it up if not — creates the managed venv via UV, installs server dependencies, and registers a boot service so Etna starts automatically. Running it again after setup just shows you the getting-started hints.
+`etna init` is idempotent: it creates or repairs Etna's managed runtime, installs Etna's per-user startup service, starts it immediately, and verifies the server is healthy. Re-running it after an upgrade refreshes the managed runtime and service definition.
 
-UV is installed automatically as a dependency.
+`etna install` with no arguments remains a compatibility alias for `etna init`. UV is installed automatically as an Etna dependency and is invoked through Etna's own Python interpreter, so it does not need to be separately present on PATH.
 
 ## Adding a kit
 
@@ -124,14 +124,24 @@ etna install ntfy
 etna install ntfy==1.0.0b1
 ```
 
+Vulcan can also be installed directly through Etna:
+
+```
+etna install vulcan
+```
+
+This runs Vulcan's official installer for the current operating system. The desktop application then handles its normal graphical setup and runtime repair.
+
 ## CLI reference
 
 ```
-etna install                          First-time setup, or getting-started hints if ready
+etna init                             Initialize/repair Etna runtime + startup service
+etna install                          Legacy alias for etna init when no target is given
 etna install <path/kit.py>            Install a kit from a local file
 etna install <path/pkg.ekp>           Install a kit package (kit + skill)
 etna install <kit_name>               Install a kit from the curated repo
 etna install <kit_name>==<version>    Install a specific version from the repo
+etna install vulcan                    Install the Vulcan desktop app
 etna update <path/kit.py>            Update a kit (no prompt)
 etna update <kit_name>               Update a kit from the repo (no prompt)
 etna update --all                    Update all installed kits from the repo
@@ -147,6 +157,7 @@ etna stop                            Stop the server
 etna restart                         Restart the server
 
 etna compat                          Auto-detect and configure all clients
+etna compat chatgpt                  Create one ChatGPT Desktop plugin per kit
 etna compat claude                   Write kit entries to Claude Desktop config
 etna compat lmstudio                 Write kit entries to LM Studio config
 etna compat cursor                   Write kit entries to Cursor config
@@ -233,3 +244,35 @@ Subdirectories (`references/`, `scripts/`, `assets/`) are optional and available
 ## License
 
 Apache 2.0
+
+### ChatGPT Desktop local plugins
+
+Run `etna compat chatgpt` to expose each installed kit as a separate personal
+plugin. Packages contain portable `plugin.json` and `mcp.json` files under
+`~/.codex/plugins/`; the catalog is `~/.agents/plugins/marketplace.json`. Each
+MCP server uses a package-contained launcher for `etna start stdio <kit_stem>`.
+The launcher records the resolved Etna executable path when available, while
+the portable manifest uses the required contained `./` command. Etna must
+already be running.
+
+Kit stems, rather than display names, determine plugin identity. A short hash
+in the package name prevents collisions between stems with similar spelling.
+Etna ownership markers identify packages for updates and stale removal.
+Unrelated catalog entries and plugin folders are preserved; malformed catalogs
+or collisions stop configuration rather than overwrite user data. After
+registration, kit install/update/remove automatically refreshes this catalog.
+
+Restart ChatGPT Desktop and refresh/install the plugins from the personal
+marketplace after configuration or changes. Entries request
+`INSTALLED_BY_DEFAULT`; actual loading depends on the host's plugin settings.
+Etna updates source packages, not ChatGPT's installed plugin cache. No HTTP
+conversion or developer-mode remote server registration is needed for these
+local packages. See the [OpenAI local plugin packaging documentation](https://developers.openai.com/plugins/build/plugins).
+
+`etna compat` detects existing configuration directories for Claude Desktop,
+LM Studio, Cursor, Windsurf, VS Code, and Continue, plus `~/.codex` for the
+shared ChatGPT Desktop/Codex plugin setup. It offers to configure all detected
+clients or select them individually, using the same writers as explicit
+`etna compat <client>` commands. Detection is based on configuration directories,
+not an executable scan; use the explicit command for a client that has not yet
+created its directory. OpenWebUI requires an explicit URL and API key.

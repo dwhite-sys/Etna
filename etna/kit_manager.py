@@ -518,7 +518,8 @@ def _install_requirements(requirements: list[str], kit_name: str = "") -> bool:
             [sys.executable, "-m", "uv", "pip", "install", "--python", str(venv_python)] + requirements,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
 
         status = f"{grey}Resolving...{white}"

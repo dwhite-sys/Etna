@@ -54,9 +54,11 @@ class ChatGPTCompatTests(unittest.TestCase):
         entry = self.read()['plugins'][0]
         directory = self.home / entry['source']['path']
         server = next(iter(json.loads((directory / 'mcp.json').read_text())['mcpServers'].values()))
-        self.assertEqual(server['command'], './etna-stdio')
-        launcher = (directory / 'etna-stdio').read_text()
-        self.assertIn("'/opt/Etna Folder/bin/etna' start stdio web", launcher)
+        launcher_name = 'etna-stdio.cmd' if os.name == 'nt' else 'etna-stdio'
+        self.assertEqual(server['command'], './' + launcher_name)
+        launcher = (directory / launcher_name).read_text()
+        expected = '"/opt/Etna Folder/bin/etna" start stdio web' if os.name == 'nt' else "'/opt/Etna Folder/bin/etna' start stdio web"
+        self.assertIn(expected, launcher)
 
     def test_preserves_unrelated_and_dedupes_owned(self):
         compat.sync(self.config, self.home)
