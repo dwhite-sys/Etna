@@ -251,12 +251,12 @@ clients or select them individually, using the same writers as explicit
 not an executable scan; use the explicit command for a client that has not yet
 created its directory. OpenWebUI requires an explicit URL and API key.
 
-## Windows 11 diagnostics (1.0.0b46)
+## Windows 11 diagnostics (1.0.0b47)
 
 Upgrade using the same Python installation that runs Etna, then repair the runtime:
 
 ```powershell
-py -m pip install --upgrade --pre etna-mcp==1.0.0b46
+py -m pip install --upgrade --pre etna-mcp==1.0.0b47
 py -m etna --version
 py -m etna init
 py -m etna status
@@ -289,3 +289,23 @@ Release CI exercises Windows and Linux on Python 3.11, 3.12, and 3.14, including
 legacy encoding repair, paths with spaces and Unicode, actual managed runtime
 startup/shutdown, health checks, and an MCP tool call. Scheduled login and desktop
 client/browser behavior still require testing on a Windows 11 device.
+
+### Windows server exits after startup (1.0.0b47)
+
+Windows background launches use a windowless process group. A supervisor records
+child startup, runtime, decimal/hexadecimal exit codes, and up to three restart
+attempts in `lifecycle.log`. It forwards real log file handles to the server,
+including when launched through `pythonw.exe`; unbuffered output and Python's
+fault handler preserve crash details when possible. Ordinary server startup and
+shutdown messages are enabled, and logs are appended rather than erased.
+
+`etna logs` now includes `lifecycle.log` and Windows' verbose scheduled-task status.
+An external force-kill of the entire process tree cannot write its own final log;
+the last lifecycle event and task result remain useful evidence. Explicit
+`etna stop` records the request and terminates the Windows process tree together
+so the supervisor does not restart a deliberately stopped server.
+
+Release smoke tests now verify health for 20 seconds after the starting CLI exits,
+then perform a tool call. This checks for the reported brief-online-then-offline
+failure, while the Windows 11 device test still determines whether it persists
+on the user's machine.

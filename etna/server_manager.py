@@ -243,20 +243,24 @@ def start_server(config: dict, verbose: bool = False) -> int:
     ensure_venv()
 
     env = {**os.environ, "ETNA_CONFIG_DIR": str(cfg.CONFIG_DIR),
-           "PYTHONIOENCODING": "utf-8"}
+           "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1",
+           "PYTHONFAULTHANDLER": "1"}
     cmd = [str(_venv_python()), "-m", "uvicorn", "etna.server:app",
            "--host", "0.0.0.0", "--port", str(port),
-           "--log-level", "info" if verbose else "error"]
+           "--log-level", "info"]
+    if sys.platform == "win32":
+        cmd = [str(_venv_python()), "-u", "-X", "faulthandler",
+               "-m", "etna", "_supervise", "--port", str(port)]
     log_path = cfg.CONFIG_DIR / "server.log"
     cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     hide_cursor()
     try:
         for attempt in range(2):
             # A persistent binary log accepts child output regardless of locale.
-            with log_path.open("wb") as log:
+            with log_path.open("ab", buffering=0) as log:
                 proc = subprocess.Popen(
                     cmd, env=env, stdin=subprocess.DEVNULL,
-                    stdout=None if verbose else subprocess.DEVNULL,
+                    stdout=None if verbose else log,
                     stderr=None if verbose else log,
                     **_background_process_options(verbose),
                 )
@@ -296,7 +300,7 @@ def _background_process_options(verbose: bool = False) -> dict:
     if verbose:
         return {}
     if sys.platform == "win32":
-        return {"creationflags": 0x00000008 | 0x00000200}  # detached + new process group
+        return {"creationflags": 0x08000000 | 0x00000200}  # no console + new process group
     return {"start_new_session": True}
 
 
@@ -309,8 +313,9 @@ def stop_server(config: dict):
 
     try:
         pid = int(pid_file.read_text().strip())
+        _record_lifecycle(f"Stop requested for process tree {pid}")
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             import signal
@@ -330,31 +335,98 @@ def stop_server(config: dict):
 
 # ── Foreground service entrypoint ─────────────────────────────────────────────
 
-def run_server_foreground(verbose: bool = False) -> int:
+def run_server_foreground(verbose: bool = False, port: int | None = None) -> int:
     """Run the Etna HTTP server in this process for an OS service manager."""
     import uvicorn
 
     cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    cfg.PID_FILE.write_text(str(os.getpid()))
+    owns_pid = os.environ.get("ETNA_SUPERVISED") != "1"
+    if owns_pid:
+        cfg.PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+    port = BASE_PORT if port is None else port
+    _record_lifecycle(f"Server starting: pid={os.getpid()}, port={port}")
 
     config = cfg.load()
-    config["port"] = BASE_PORT
+    config["port"] = port
     cfg.save(config)
 
     try:
         uvicorn.run(
             "etna.server:app",
             host="0.0.0.0",
-            port=BASE_PORT,
-            log_level="info" if verbose else "error",
+            port=port,
+            log_level="info",
+            access_log=verbose,
         )
+    except BaseException:
+        import traceback
+        _record_lifecycle("Server raised an exception:\n" + traceback.format_exc())
+        raise
     finally:
+        _record_lifecycle(f"Server leaving run loop: pid={os.getpid()}")
         try:
-            if cfg.PID_FILE.exists() and cfg.PID_FILE.read_text().strip() == str(os.getpid()):
+            if owns_pid and cfg.PID_FILE.exists() and cfg.PID_FILE.read_text().strip() == str(os.getpid()):
                 cfg.PID_FILE.unlink()
         except OSError:
             pass
     return 0
+
+
+def _record_lifecycle(message: str):
+    """Keep process events separately from uvicorn's logging configuration."""
+    from datetime import datetime, timezone
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with (cfg.CONFIG_DIR / "lifecycle.log").open("a", encoding="utf-8") as stream:
+        stream.write(f"{datetime.now(timezone.utc).isoformat()} {message}\n")
+        stream.flush()
+
+
+def run_server_supervised(port: int | None = None) -> int:
+    """Retain Windows child exit codes, including crashes without a traceback."""
+    from etna import __version__
+    port = BASE_PORT if port is None else port
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+    _record_lifecycle(
+        f"Supervisor starting: Etna={__version__}, pid={os.getpid()}, "
+        f"Python={sys.version.split()[0]}, executable={sys.executable}, port={port}"
+    )
+    env = {**os.environ, "ETNA_SUPERVISED": "1", "ETNA_CONFIG_DIR": str(cfg.CONFIG_DIR),
+           "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1"}
+    child = None
+    try:
+        for attempt in range(4):
+            # Keep the child in the scheduled task's process tree. No detached
+            # flag: /End and an explicit stop must stop both processes together.
+            options = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
+            child = subprocess.Popen(
+                [str(_venv_python()), "-u", "-X", "faulthandler", "-m", "etna",
+                 "_serve", "--port", str(port)],
+                env=env, stdin=subprocess.DEVNULL,
+                stdout=sys.stdout, stderr=sys.stderr, **options,
+            )
+            _record_lifecycle(f"Server child started: pid={child.pid}, attempt={attempt + 1}")
+            started = time.monotonic()
+            code = child.wait()
+            _record_lifecycle(
+                f"Server child exited: pid={child.pid}, code={code}, "
+                f"hex=0x{code & 0xffffffff:08X}, uptime={time.monotonic() - started:.1f}s"
+            )
+            if attempt < 3:
+                _record_lifecycle("Unexpected server exit; retrying in 3 seconds")
+                time.sleep(3)
+        _record_lifecycle("Server stopped after four unexpected exits; run etna logs")
+        return code or 1
+    except BaseException:
+        import traceback
+        _record_lifecycle("Supervisor exception:\n" + traceback.format_exc())
+        raise
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            child.wait(timeout=10)
+        if cfg.PID_FILE.exists() and cfg.PID_FILE.read_text().strip() == str(os.getpid()):
+            cfg.PID_FILE.unlink(missing_ok=True)
 
 
 def wait_for_server(timeout: float = 15.0) -> bool:
@@ -520,8 +592,8 @@ def _install_task_scheduler(runtime_python: Path):
         + "os.environ['PYTHONIOENCODING'] = 'utf-8'\n"
         + "sys.stdin = open(os.devnull, encoding='utf-8')\n"
         + "sys.stdout = sys.stderr = open(" + repr(str(cfg.CONFIG_DIR.resolve() / "service.log")) + ", 'a', encoding='utf-8', buffering=1)\n"
-        + "from etna.server_manager import run_server_foreground\n"
-        + "raise SystemExit(run_server_foreground())\n",
+        + "from etna.server_manager import run_server_supervised\n"
+        + "raise SystemExit(run_server_supervised())\n",
         encoding="utf-8",
     )
     arguments = escape(subprocess.list2cmdline([str(launcher.resolve())]))
@@ -550,6 +622,11 @@ def _install_task_scheduler(runtime_python: Path):
     <AllowStartOnDemand>true</AllowStartOnDemand>
     <Enabled>true</Enabled>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
   </Settings>
   <Actions Context="Author">
     <Exec>

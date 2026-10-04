@@ -85,7 +85,7 @@ class WindowsCompatibilityTests(unittest.TestCase):
 
     def test_background_windows_detaches_without_verbose_detach(self):
         with patch.object(sm.sys, 'platform', 'win32'):
-            self.assertEqual(sm._background_process_options()['creationflags'], 0x208)
+            self.assertEqual(sm._background_process_options()['creationflags'], 0x08000200)
             self.assertEqual(sm._background_process_options(True), {})
 
     def test_failed_start_never_saves_success(self):
@@ -121,6 +121,38 @@ class WindowsCompatibilityTests(unittest.TestCase):
         with patch.object(cli, '_etna_executable', return_value=executable):
             cli._write_stdio_config(path, 'mcpServers', {'kits': {'web': {'kit_name': 'Web'}}}, silent=True)
         self.assertEqual(json.loads(path.read_text())['mcpServers']['Web']['command'], executable)
+
+    def test_supervisor_records_native_exit_codes_and_bounds_restarts(self):
+        child = Mock(pid=456)
+        child.wait.return_value = 0xC0000005
+        child.poll.return_value = 0xC0000005
+        with patch.object(sm.subprocess, 'Popen', return_value=child) as launch, patch.object(sm.time, 'sleep'):
+            self.assertEqual(sm.run_server_supervised(port=9876), 0xC0000005)
+        log = (self.root / 'lifecycle.log').read_text(encoding='utf-8')
+        self.assertIn('hex=0xC0000005', log)
+        self.assertIn('stopped after four unexpected exits', log)
+        self.assertEqual(launch.call_count, 4)
+        self.assertIs(launch.call_args.kwargs['stdout'], sm.sys.stdout)
+        self.assertIs(launch.call_args.kwargs['stderr'], sm.sys.stderr)
+        self.assertEqual(launch.call_args.kwargs['env']['PYTHONFAULTHANDLER'], '1')
+        self.assertFalse(cfg.PID_FILE.exists())
+
+    def test_foreground_logs_clean_shutdown_without_overwriting_supervisor_pid(self):
+        cfg.PID_FILE.write_text('555', encoding='ascii')
+        with patch.dict(sm.os.environ, {'ETNA_SUPERVISED': '1'}), patch('uvicorn.run') as run:
+            sm.run_server_foreground(port=9876)
+        self.assertEqual(cfg.PID_FILE.read_text(), '555')
+        log = (self.root / 'lifecycle.log').read_text(encoding='utf-8')
+        self.assertIn('Server starting:', log)
+        self.assertIn('Server leaving run loop:', log)
+        self.assertEqual(run.call_args.kwargs['log_level'], 'info')
+
+    def test_foreground_retains_exception_before_propagating(self):
+        with patch('uvicorn.run', side_effect=RuntimeError('server failure')):
+            with self.assertRaisesRegex(RuntimeError, 'server failure'):
+                sm.run_server_foreground()
+        self.assertIn('server failure', (self.root / 'lifecycle.log').read_text(encoding='utf-8'))
+        self.assertFalse(cfg.PID_FILE.exists())
 
 
 if __name__ == '__main__':

@@ -1,2 +1,2 @@
 # etna-mcp — Etna tool server framework
-__version__ = "1.0.0b46"
+__version__ = "1.0.0b47"

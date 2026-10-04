@@ -6,6 +6,7 @@ import subprocess
 import socket
 import sys
 import tempfile
+import time
 import urllib.request
 
 with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
@@ -33,6 +34,12 @@ with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(f'http://localhost:{port}/health', timeout=10) as response:
             assert json.load(response)['service'] == 'etna-mcp'
+        # The initiating CLI has exited. Verify the background process remains
+        # healthy well beyond the reported few-second Windows shutdown.
+        for _ in range(20):
+            time.sleep(1)
+            with opener.open(f'http://localhost:{port}/health', timeout=5) as response:
+                assert json.load(response)['service'] == 'etna-mcp'
         request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                    'params': {'name': 'echo', 'arguments': {'text': 'café 工具'}}}
         result = subprocess.run(command + ['start', 'stdio'], input=json.dumps(request)+'\n',
@@ -44,3 +51,42 @@ with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
         print('Managed runtime, legacy encoding repair, UTF-8 path, health and MCP verified.')
     finally:
         subprocess.run(command + ['stop'], env=env, timeout=30)
+    if sys.platform == 'win32':
+        # Exercise the exact pythonw service launcher without registering a task
+        # on the runner. Pythonw has different standard-stream behavior.
+        from unittest.mock import patch
+        from etna import server_manager as manager
+        with patch.object(manager.cfg, 'CONFIG_DIR', config), patch.object(manager, '_windows_user_sid', return_value='S-1-5-21-123'), patch.object(manager, '_run_checked'), patch.object(manager.subprocess, 'run'):
+            manager._install_task_scheduler(config / 'venv' / 'Scripts' / 'python.exe')
+        launcher = config / 'service_launcher.py'
+        launcher.write_text(launcher.read_text(encoding='utf-8').replace(
+            'run_server_supervised()', f'run_server_supervised(port={port})'), encoding='utf-8')
+        service = subprocess.Popen(
+            [str(config / 'venv' / 'Scripts' / 'pythonw.exe'), str(launcher)],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=0x08000000,
+        )
+        try:
+            for _ in range(60):
+                try:
+                    with opener.open(f'http://localhost:{port}/health', timeout=1) as response:
+                        assert json.load(response)['service'] == 'etna-mcp'
+                    break
+                except OSError:
+                    if service.poll() is not None:
+                        raise RuntimeError('pythonw launcher exited before becoming healthy')
+                    time.sleep(0.25)
+            else:
+                raise RuntimeError('pythonw launcher health timeout')
+            for _ in range(20):
+                time.sleep(1)
+                with opener.open(f'http://localhost:{port}/health', timeout=5) as response:
+                    assert json.load(response)['service'] == 'etna-mcp'
+            assert 'Application startup complete' in (config / 'service.log').read_text(encoding='utf-8')
+            assert 'Server child started:' in (config / 'lifecycle.log').read_text(encoding='utf-8')
+            print('Windowless pythonw service launcher, real log handles and 20-second health verified.')
+        finally:
+            subprocess.run(command + ['stop'], env=env, timeout=30)
+            if service.poll() is None:
+                service.terminate()
+            service.wait(timeout=15)

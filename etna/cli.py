@@ -1363,13 +1363,21 @@ def cmd_logs(args: list[str]):
     import platform
     print(f"Etna {__version__}; Python {sys.version.split()[0]}; {platform.platform()}")
     print(f"Config directory: {cfg.CONFIG_DIR}")
-    for name in ("server.log", "service.log"):
+    for name in ("lifecycle.log", "server.log", "service.log"):
         path = cfg.CONFIG_DIR / name
         print(f"\n--- {path} ---")
         if path.exists():
             print("\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]))
         else:
             print("No log yet")
+
+    if sys.platform == "win32":
+        print("\n--- Windows scheduled task status ---")
+        result = subprocess.run(
+            ["schtasks", "/Query", "/TN", "EtnaMCPServer", "/V", "/FO", "LIST"],
+            capture_output=True, text=True, errors="replace", timeout=15,
+        )
+        print(result.stdout or result.stderr)
 
 
 def main():
@@ -1396,8 +1404,11 @@ def main():
 
     if command == "init":
         cmd_init(rest)
-    elif command == "_serve":
-        sys.exit(sm.run_server_foreground(verbose="--verbose" in rest))
+    elif command in ("_serve", "_supervise"):
+        port = int(rest[rest.index("--port") + 1]) if "--port" in rest else None
+        if command == "_supervise":
+            sys.exit(sm.run_server_supervised(port=port))
+        sys.exit(sm.run_server_foreground(verbose="--verbose" in rest, port=port))
     elif command == "install":
         cmd_install(rest)
     elif command == "update":
