@@ -1,5 +1,7 @@
 """Real managed-runtime smoke test for release CI; no OS service registration."""
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -56,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
         # on the runner. Pythonw has different standard-stream behavior.
         from unittest.mock import patch
         from etna import server_manager as manager
-        with patch.object(manager.cfg, 'CONFIG_DIR', config), patch.object(manager, '_windows_user_sid', return_value='S-1-5-21-123'), patch.object(manager, '_run_checked'), patch.object(manager.subprocess, 'run'):
+        with patch.object(manager.cfg, 'CONFIG_DIR', config), patch.object(manager, '_windows_user_sid', return_value='S-1-5-21-123'), patch.object(manager, '_run_checked'), patch.object(manager.subprocess, 'run'), contextlib.redirect_stdout(io.StringIO()):
             manager._install_task_scheduler(config / 'venv' / 'Scripts' / 'python.exe')
         launcher = config / 'service_launcher.py'
         launcher.write_text(launcher.read_text(encoding='utf-8').replace(
@@ -85,6 +87,12 @@ with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
             assert 'Application startup complete' in (config / 'service.log').read_text(encoding='utf-8')
             assert 'Server child started:' in (config / 'lifecycle.log').read_text(encoding='utf-8')
             print('Windowless pythonw service launcher, real log handles and 20-second health verified.')
+        except BaseException:
+            for name in ('service.log', 'lifecycle.log'):
+                log = config / name
+                if log.exists():
+                    print(log.read_text(encoding='utf-8', errors='replace').encode('ascii', 'backslashreplace').decode())
+            raise
         finally:
             subprocess.run(command + ['stop'], env=env, timeout=30)
             if service.poll() is None:
