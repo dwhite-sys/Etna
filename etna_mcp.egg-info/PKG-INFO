@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: etna-mcp
-Version: 1.0.0b45
+Version: 1.0.0b46
 Summary: A lightweight tool server for AI models — extend with drop-in kit files.
 Author: dwhite-sys
 License: Apache-2.0

@@ -251,12 +251,12 @@ clients or select them individually, using the same writers as explicit
 not an executable scan; use the explicit command for a client that has not yet
 created its directory. OpenWebUI requires an explicit URL and API key.
 
-## Windows 11 diagnostics (1.0.0b45)
+## Windows 11 diagnostics (1.0.0b46)
 
 Upgrade using the same Python installation that runs Etna, then repair the runtime:
 
 ```powershell
-py -m pip install --upgrade --pre etna-mcp==1.0.0b45
+py -m pip install --upgrade --pre etna-mcp==1.0.0b46
 py -m etna --version
 py -m etna init
 py -m etna status
