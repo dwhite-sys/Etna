@@ -80,6 +80,12 @@ etna init
 
 `etna init` is idempotent: it creates or repairs Etna's managed runtime, installs Etna's per-user startup service, starts it immediately, and verifies the server is healthy. Re-running it after an upgrade refreshes the managed runtime and service definition.
 
+On Windows, ordinary `etna start` also checks login startup registration, even if
+the server is already online. It repairs missing, disabled, or stale tasks and
+waits for the repaired task to start the server. A healthy registration is left
+alone. This works for standalone Etna installations; Vulcan is not required.
+`etna start stdio` only connects a client and does not change startup registration.
+
 `etna install` with no arguments remains a compatibility alias for `etna init`. UV is installed automatically as an Etna dependency and is invoked through Etna's own Python interpreter, so it does not need to be separately present on PATH.
 
 ## Adding a kit
@@ -251,12 +257,12 @@ clients or select them individually, using the same writers as explicit
 not an executable scan; use the explicit command for a client that has not yet
 created its directory. OpenWebUI requires an explicit URL and API key.
 
-## Windows 11 diagnostics (1.0.0b48)
+## Windows 11 diagnostics (1.0.0b49)
 
 Upgrade using the same Python installation that runs Etna, then repair the runtime:
 
 ```powershell
-py -m pip install --upgrade --pre etna-mcp==1.0.0b48
+py -m pip install --upgrade --pre etna-mcp==1.0.0b49
 py -m etna --version
 py -m etna init
 py -m etna status

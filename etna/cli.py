@@ -540,6 +540,13 @@ def cmd_start(args: list[str]):
         return
 
     try:
+        if sys.platform == 'win32' and not sm.service_registered():
+            print(f"{PREFIX}{grey}Repairing Windows login startup...{white}")
+            sm.install_service()
+            if not sm.service_registered():
+                raise RuntimeError('Windows login startup verification failed; run etna init and check etna logs')
+            if not sm.wait_for_server():
+                raise RuntimeError('Windows login task was repaired but the server did not become healthy; check etna logs')
         port = sm.start_server(config, verbose=verbose)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"{PREFIX}{red}Server failed to start: {exc}{white}", file=sys.stderr)

@@ -28,6 +28,10 @@ with tempfile.TemporaryDirectory(prefix='Etna space ') as temporary:
     command = [sys.executable, '-c',
                "import os; from etna import server_manager as sm; "
                "sm.BASE_PORT = int(os.environ['ETNA_SMOKE_PORT']); "
+               # This fixture tests real process lifetime, not registration of
+               # the runner's global EtnaMCPServer task. Registration repair is
+               # exercised with isolated task definitions in the unit suite.
+               "sm.service_registered = lambda: True; "
                "from etna.cli import main; main()"]
     try:
         subprocess.run(command + ['start'], env=env, check=True, timeout=180)

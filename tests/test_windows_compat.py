@@ -89,11 +89,89 @@ class WindowsCompatibilityTests(unittest.TestCase):
             self.assertEqual(sm._background_process_options(True), {})
 
     def test_failed_start_never_saves_success(self):
-        with patch.object(cli.cfg, 'load', return_value={}), patch.object(cli.cfg, 'save') as save, patch.object(sm, 'start_server', side_effect=RuntimeError('failure')), contextlib.redirect_stderr(io.StringIO()):
+        with patch.object(cli.cfg, 'load', return_value={}), patch.object(cli.cfg, 'save') as save, patch.object(sm, 'service_registered', return_value=True), patch.object(sm, 'start_server', side_effect=RuntimeError('failure')), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as error:
                 cli.cmd_start([])
         self.assertEqual(error.exception.code, 1)
         save.assert_not_called()
+
+    def startup_definition(self):
+        captured = {}
+        def checked(command, **kwargs):
+            if '/Create' in command:
+                captured['xml'] = Path(command[command.index('/XML') + 1]).read_text(encoding='utf-16')
+            return Mock(returncode=0)
+        python = cfg.VENV_DIR / 'Scripts' / 'pythonw.exe'
+        python.parent.mkdir(parents=True)
+        python.touch()
+        with patch.object(sm, '_windows_user_sid', return_value='S-1-5-21-123'), patch.object(sm, '_run_checked', side_effect=checked), patch.object(sm.subprocess, 'run'), contextlib.redirect_stdout(io.StringIO()):
+            sm._install_task_scheduler(python.with_name('python.exe'))
+        return captured['xml']
+
+    def test_login_task_requires_current_user_enabled_trigger_and_live_paths(self):
+        valid = self.startup_definition()
+        self.assertTrue(sm._windows_task_matches(valid, 'S-1-5-21-123'), valid)
+        for invalid in (
+            valid.replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>'),
+            valid.replace('LogonTrigger', 'BootTrigger'),
+            valid.replace('S-1-5-21-123', 'S-1-5-21-999'),
+            valid.replace('InteractiveToken', 'ServiceAccount'),
+            valid.replace('pythonw.exe', 'python.exe'),
+            valid.replace('service_launcher.py', 'old_launcher.py'),
+            valid.replace('<WorkingDirectory>', '<WorkingDirectory>wrong'),
+            valid.replace('Context="Author"', 'Context="Other"'),
+            valid.replace('</Actions>', '<Exec /></Actions>'),
+            '<Task />', 'invalid XML',
+        ):
+            with self.subTest(definition=invalid):
+                self.assertFalse(sm._windows_task_matches(invalid, 'S-1-5-21-123'))
+        (self.root / 'service_launcher.py').unlink()
+        self.assertFalse(sm._windows_task_matches(valid, 'S-1-5-21-123'))
+
+    def test_task_query_handles_unicode_output_and_query_failures(self):
+        valid = self.startup_definition()
+        for encoding in ('utf-16', 'utf-16-le', 'utf-8'):
+            with self.subTest(encoding=encoding), patch.object(sm.sys, 'platform', 'win32'), patch.object(sm.locale, 'getpreferredencoding', return_value='utf-8'), patch.object(sm, '_windows_user_sid', return_value='S-1-5-21-123'), patch.object(sm.subprocess, 'run', return_value=Mock(returncode=0, stdout=valid.encode(encoding))) as run:
+                self.assertTrue(sm.service_registered())
+                self.assertIn('/XML', run.call_args.args[0])
+        for result in (Mock(returncode=1), Mock(returncode=0, stdout=b'broken')):
+            with patch.object(sm.sys, 'platform', 'win32'), patch.object(sm.subprocess, 'run', return_value=result), patch.object(sm, '_windows_user_sid', return_value='S-1-5-21-123'):
+                self.assertFalse(sm.service_registered())
+        with patch.object(sm.sys, 'platform', 'win32'), patch.object(sm.subprocess, 'run', side_effect=OSError('missing')):
+            self.assertFalse(sm.service_registered())
+
+    def test_windows_start_repairs_registration_before_start_even_if_online(self):
+        events = []
+        with patch.object(cli.sys, 'platform', 'win32'), patch.object(sm, 'service_registered', side_effect=[False, True]), patch.object(sm, 'install_service', side_effect=lambda: events.append('repair')), patch.object(sm, 'wait_for_server', side_effect=lambda: events.append('health') or True), patch.object(sm, 'start_server', side_effect=lambda *a, **k: events.append('start') or 8467), contextlib.redirect_stdout(io.StringIO()):
+            cli.cmd_start([])
+        self.assertEqual(events, ['repair', 'health', 'start'])
+        self.assertEqual(cfg.load()['port'], 8467)
+
+    def test_healthy_windows_registration_is_not_reinstalled(self):
+        with patch.object(cli.sys, 'platform', 'win32'), patch.object(sm, 'service_registered', return_value=True), patch.object(sm, 'install_service') as repair, patch.object(sm, 'start_server', return_value=8467):
+            cli.cmd_start([])
+        repair.assert_not_called()
+
+    def test_failed_registration_repair_does_not_report_success(self):
+        with patch.object(cli.sys, 'platform', 'win32'), patch.object(cfg, 'load', return_value={}), patch.object(sm, 'service_registered', return_value=False), patch.object(sm, 'install_service'), patch.object(sm, 'start_server') as start, patch.object(cfg, 'save') as save, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                cli.cmd_start([])
+        self.assertEqual(error.exception.code, 1)
+        start.assert_not_called()
+        save.assert_not_called()
+
+    def test_stdio_start_does_not_repair_login_task(self):
+        with patch.object(cli.sys, 'platform', 'win32'), patch.object(cfg, 'load', return_value={'port': 8467}), patch.object(cli, '_port_open', return_value=True), patch.object(sm, 'service_registered') as query, patch('etna.stdio_shim.run_shim') as shim:
+            cli.cmd_start(['stdio'])
+        query.assert_not_called()
+        shim.assert_called_once_with(8467, None)
+
+    def test_repaired_task_must_become_healthy_before_manual_start(self):
+        with patch.object(cli.sys, 'platform', 'win32'), patch.object(cfg, 'load', return_value={}), patch.object(sm, 'service_registered', side_effect=[False, True]), patch.object(sm, 'install_service'), patch.object(sm, 'wait_for_server', return_value=False), patch.object(sm, 'start_server') as start, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                cli.cmd_start([])
+        self.assertEqual(error.exception.code, 1)
+        start.assert_not_called()
 
     def test_early_child_failure_cleans_pid_and_keeps_diagnostics(self):
         process = Mock(pid=123)
