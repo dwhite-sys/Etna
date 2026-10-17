@@ -110,7 +110,7 @@ class WindowsCompatibilityTests(unittest.TestCase):
 
     def test_login_task_requires_current_user_enabled_trigger_and_live_paths(self):
         valid = self.startup_definition()
-        self.assertTrue(sm._windows_task_matches(valid, 'S-1-5-21-123'))
+        self.assertTrue(sm._windows_task_matches(valid, 'S-1-5-21-123'), valid)
         for invalid in (
             valid.replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>'),
             valid.replace('LogonTrigger', 'BootTrigger'),

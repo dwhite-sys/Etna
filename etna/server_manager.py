@@ -497,7 +497,9 @@ def _windows_task_matches(definition: str, sid: str) -> bool:
             return False
         python = (cfg.VENV_DIR / 'Scripts' / 'pythonw.exe').resolve()
         launcher = (cfg.CONFIG_DIR / 'service_launcher.py').resolve()
-        same_path = lambda a, b: ntpath.normcase(ntpath.normpath(a)) == ntpath.normcase(ntpath.normpath(str(b)))
+        # Windows may supply a short (8.3) config path while resolve() expands
+        # it. Compare canonical paths on both sides, including task commands.
+        same_path = lambda a, b: ntpath.normcase(str(Path(a).resolve())) == ntpath.normcase(str(Path(b).resolve()))
         return (
             same_path(text(action, 't:Command').strip('"'), python)
             and text(action, 't:Arguments') == subprocess.list2cmdline([str(launcher)])
