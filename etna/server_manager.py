@@ -19,6 +19,9 @@ import subprocess
 import sys
 import time
 import csv
+import locale
+import ntpath
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from etna import config as cfg
@@ -447,12 +450,62 @@ def service_registered() -> bool:
     if sys.platform == "darwin":
         return (Path.home() / "Library" / "LaunchAgents" / "net.etna-mcp.etna.plist").exists()
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["schtasks", "/Query", "/TN", "EtnaMCPServer"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        return result.returncode == 0
+        try:
+            result = subprocess.run(
+                ["schtasks", "/Query", "/TN", "EtnaMCPServer", "/XML"],
+                capture_output=True, timeout=15,
+            )
+            if result.returncode != 0:
+                return False
+            raw = result.stdout
+            # Accept redirected Unicode output and native-code-page output.
+            if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+                definition = raw.decode('utf-16')
+            elif b'\x00' in raw[:100]:
+                definition = raw.decode('utf-16-le')
+            else:
+                definition = raw.decode(locale.getpreferredencoding(False))
+            return _windows_task_matches(definition, _windows_user_sid())
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            return False
     return False
+
+
+def _windows_task_matches(definition: str, sid: str) -> bool:
+    """Validate the current user's login task, rather than just its name."""
+    try:
+        task = ET.fromstring(definition)
+        ns = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+        if task.tag != '{' + ns['t'] + '}Task':
+            return False
+        text = lambda node, path: node.findtext(path, default='', namespaces=ns).strip()
+        enabled = lambda node, path: text(node, path).lower() not in ('false', '0')
+        if not sid or not enabled(task, 't:Settings/t:Enabled'):
+            return False
+        triggers = task.findall('t:Triggers/t:LogonTrigger', ns)
+        if not any(text(t, 't:UserId') == sid and enabled(t, 't:Enabled') for t in triggers):
+            return False
+        principals = task.findall('t:Principals/t:Principal', ns)
+        actions = task.find('t:Actions', ns)
+        if actions is None or len(actions) != 1:
+            return False
+        principal = next((p for p in principals if p.get('id') == actions.get('Context')), None)
+        if principal is None or text(principal, 't:UserId') != sid or text(principal, 't:LogonType') != 'InteractiveToken':
+            return False
+        action = actions.find('t:Exec', ns)
+        if action is None:
+            return False
+        python = (cfg.VENV_DIR / 'Scripts' / 'pythonw.exe').resolve()
+        launcher = (cfg.CONFIG_DIR / 'service_launcher.py').resolve()
+        same_path = lambda a, b: ntpath.normcase(ntpath.normpath(a)) == ntpath.normcase(ntpath.normpath(str(b)))
+        return (
+            same_path(text(action, 't:Command').strip('"'), python)
+            and text(action, 't:Arguments') == subprocess.list2cmdline([str(launcher)])
+            and same_path(text(action, 't:WorkingDirectory'), cfg.CONFIG_DIR.resolve())
+            and python.is_file() and launcher.is_file()
+        )
+    except (ET.ParseError, ValueError, OSError):
+        return False
 
 
 def _run_checked(cmd: list[str], *, description: str):
