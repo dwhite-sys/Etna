@@ -1222,6 +1222,10 @@ def _browser_start():
          "--remote-allow-origins=*",
          f"--user-data-dir={user_data_dir}",
          "--no-first-run",
+         # Without this Chrome opens on the "Who's using Chrome?" profile picker,
+         # where no profile is loaded — connect_over_cdp then fails with
+         # "Browser context management is not supported".
+         f"--profile-directory={os.environ.get('ETNA_CHROME_PROFILE_DIR', 'Default')}",
          "--no-default-browser-check"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
