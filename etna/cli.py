@@ -1246,8 +1246,168 @@ def _browser_start():
     print(f"{clear_line}{PREFIX}{orange}Warning: Chrome did not become ready in time.{white}", file=sys.stderr)
 
 
+def _chrome_args() -> list[str]:
+    return [
+        f"--remote-debugging-port={CDP_PORT}",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={cfg.CHROME_PROFILE}",
+        "--no-first-run",
+        # Without this Chrome opens on the "Who's using Chrome?" profile picker,
+        # where no profile is loaded — connect_over_cdp then fails with
+        # "Browser context management is not supported".
+        f"--profile-directory={os.environ.get('ETNA_CHROME_PROFILE_DIR', 'Default')}",
+        "--no-default-browser-check",
+    ]
+
+
+def _user_manager_available() -> bool:
+    """True when a systemd user manager answers for this process."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if not shutil.which("systemd-run") or not shutil.which("systemctl"):
+        return False
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        return False
+    try:
+        r = subprocess.run(["systemctl", "--user", "show-environment"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _session_graphical_state() -> bool | None:
+    """Whether the user session has a display.
+
+    None means "could not determine" — the caller must not blame the session then.
+    """
+    if not _user_manager_available():
+        return None
+    try:
+        r = subprocess.run(["systemctl", "--user", "show-environment"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    env = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    return bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+
+
+def _unit_main_pid(unit: str) -> int | None:
+    try:
+        r = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", f"{unit}.service"],
+                           capture_output=True, text=True, timeout=5)
+        value = (r.stdout or "").strip()
+        pid = int(value)
+        return pid or None
+    except Exception:
+        return None
+
+
+def _launch_in_user_session(args: list[str]) -> str | None:
+    """Launch Chrome inside the desktop session via the systemd user manager.
+
+    The Etna server may be started by a service that has no display environment;
+    anything it spawns dies immediately. The user manager owns the session
+    environment, so launching through it puts Chrome where the user can see it.
+    Returns None on success, or an error string.
+    """
+    unit = "etna-chrome"
+    for verb in ("stop", "reset-failed"):
+        subprocess.run(["systemctl", "--user", verb, f"{unit}.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    try:
+        r = subprocess.run(["systemd-run", "--user", f"--unit={unit}", "--collect", *args],
+                           capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return f"systemd-run failed: {exc}"
+    if r.returncode != 0:
+        return (r.stderr or r.stdout or "").strip() or f"systemd-run exited {r.returncode}"
+    for _ in range(30):
+        pid = _unit_main_pid(unit)
+        if pid:
+            cfg.CHROME_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            cfg.CHROME_PID_FILE.write_text(str(pid))
+            break
+        time.sleep(0.1)
+    return None
+
+
+def _browser_start():
+    if _cdp_alive():
+        print(f"{PREFIX}{green}Chrome CDP already running on port {grey}{CDP_PORT}{white}")
+        return
+
+    chrome = _find_chrome()
+    if not chrome:
+        print(f"{PREFIX}{red}Could not find Chrome. Install Chrome and try again.{white}")
+        sys.exit(1)
+
+    print(f"{PREFIX}{yellow}Launching Chrome with CDP on port {grey}{CDP_PORT}{white}...", end="\r")
+    args = [chrome, *_chrome_args()]
+
+    launch_error = None
+    proc = None
+    in_user_session = _user_manager_available()
+    if in_user_session:
+        launch_error = _launch_in_user_session(args)
+    if not in_user_session or launch_error:
+        # No user manager (macOS, Windows, non-systemd Linux) or it refused:
+        # launch directly, which is correct when Etna already runs in the session.
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                **sm._background_process_options(),
+            )
+            cfg.CHROME_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            cfg.CHROME_PID_FILE.write_text(str(proc.pid))
+        except Exception as exc:
+            launch_error = f"Failed to launch Chrome: {exc}"
+
+    for i in range(40):
+        time.sleep(0.5)
+        spin = throbber(i)
+        print(f"{clear_line}{PREFIX}{yellow}{spin} Waiting for Chrome on port {grey}{CDP_PORT}{white}...", end="\r")
+        if _cdp_alive():
+            print(f"{clear_line}{PREFIX}{green}Chrome ready on port {grey}{CDP_PORT}{white}")
+            return
+        if proc is not None and proc.poll() is not None:
+            # Direct child died: report that, and reap it rather than leaking a zombie.
+            proc.wait()
+            break
+
+    print(clear_line, end="")
+    if launch_error:
+        print(f"{PREFIX}{red}Chrome did not start: {white}{launch_error}", file=sys.stderr)
+    session_state = _session_graphical_state()
+    if session_state is False:
+        print(f"{PREFIX}{orange}Chrome did not become ready in time, and the Etna server is not running "
+              f"in a desktop session (no DISPLAY or WAYLAND_DISPLAY for its user manager).{white}",
+              file=sys.stderr)
+        print(f"{PREFIX}{grey}Start Etna from a desktop session, or run {white}etna browser start{grey} in one.{white}",
+              file=sys.stderr)
+    else:
+        print(f"{PREFIX}{orange}Warning: Chrome did not become ready in time.{white}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _browser_stop():
     pid_file = cfg.CHROME_PID_FILE
+    # When Chrome was started through the user manager, stopping the unit is the
+    # clean shutdown and also clears the transient unit for the next launch.
+    if _user_manager_available():
+        subprocess.run(["systemctl", "--user", "stop", "etna-chrome.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        subprocess.run(["systemctl", "--user", "reset-failed", "etna-chrome.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        pid_file.unlink(missing_ok=True)
+        if not _cdp_alive():
+            print(f"{PREFIX}{green}Chrome stopped.{white}")
+            return
     if not pid_file.exists():
         print(f"{PREFIX}{red}Chrome{white}: no PID file found.{white}")
         return
